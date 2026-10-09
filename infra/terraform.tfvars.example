@@ -1,0 +1,35 @@
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "japaneast"
+name_prefix     = "filesarchive"
+
+# Stage 1: foundations only. Stage 2: create_job=true (manual).
+# Stage 3: enable_schedule=true only after verifying a dry run.
+create_job      = false
+enable_schedule = false
+image_tag       = "v1"
+
+app_config_key          = "archive:settings"
+app_config_label        = "production"
+job_timeout_seconds     = 3300
+replica_timeout_seconds = 3600
+
+# Input uses control-plane /shares/ IDs; Terraform converts Files role scopes
+# to /fileshares/ as required by FileREST OAuth (source and destination).
+source_file_share_resource_ids = [
+  "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/existing-storage-rg/providers/Microsoft.Storage/storageAccounts/sourcesample/fileServices/default/shares/source"
+]
+destination_file_share_resource_ids = []
+destination_blob_container_resource_ids = [
+  "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/existing-storage-rg/providers/Microsoft.Storage/storageAccounts/archivesample/blobServices/default/containers/archive"
+]
+
+# Optional: Entra object IDs, not client IDs. Required for the operator's
+# configuration updates unless equivalent data-plane access is already assigned.
+configuration_operator_object_ids = []
+
+app_configuration_sku                      = "free"
+app_configuration_purge_protection_enabled = false
+
+tags = {
+  purpose = "files-archive-sample"
+}

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "dryRun": true,
+  "maxFilesPerRun": 1000,
+  "rules": [
+    {
+      "id": "documents-to-blob",
+      "source": {
+        "account": "sourcestorage",
+        "share": "documents",
+        "path": "completed"
+      },
+      "destination": {
+        "kind": "blob",
+        "account": "archivestorage",
+        "container": "archive",
+        "path": "documents",
+        "tier": "Cool"
+      },
+      "olderThanDays": 90
+    },
+    {
+      "id": "reports-to-files",
+      "source": {
+        "account": "sourcestorage",
+        "share": "reports",
+        "path": ""
+      },
+      "destination": {
+        "kind": "files",
+        "account": "archivestorage",
+        "share": "archive",
+        "path": "reports"
+      },
+      "olderThanDays": 180
+    }
+  ]
+}

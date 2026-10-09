@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+job/settings.local.json
+job/settings.kvset.json
+infra/.terraform/
+infra/*.tfstate*
+infra/*.tfplan
+infra/terraform.tfvars
+infra/crash.log
+.azure/
