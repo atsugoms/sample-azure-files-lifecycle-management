@@ -17,6 +17,49 @@ App Configuration のキー **`archive:settings`** に、`version`、`dryRun`、
 `maxFilesPerRun`、`rules` を含む設定 JSON 全体を 1 つの値として登録します。
 コンテンツタイプは `application/json`、既定ラベルは `production` です。
 
+#### 投入する JSON のサンプル
+
+以下の JSON 全体を App Configuration のキー `archive:settings` の値として登録します。
+`key` や `label` を含むインポート用の JSON ではなく、アプリが読み込む設定そのものです。
+ファイル版は [settings.appconfig.example.json](./settings.appconfig.example.json) です。
+
+```json
+{
+  "version": 1,
+  "dryRun": true,
+  "maxFilesPerRun": 1000,
+  "rules": [
+    {
+      "id": "documents-to-blob",
+      "source": {
+        "account": "sourcestorage",
+        "share": "documents",
+        "path": "completed"
+      },
+      "destination": {
+        "kind": "blob",
+        "account": "archivestorage",
+        "container": "archive",
+        "path": "documents",
+        "tier": "Cool"
+      },
+      "olderThanDays": 90
+    }
+  ]
+}
+```
+
+この例は `sourcestorage` の Files 共有 `documents` 内の `completed` 以下を再帰走査し、
+最終書き込みから 90 日より古いファイルを対象にします。移動先は `archivestorage` の
+Blob コンテナー `archive` 内の `documents` 以下で、アクセス層は `Cool` です。
+`dryRun: true` のため実際のコピー・削除は行いません。実在するリソース名に置き換えて
+対象を確認した後、移動を実行する場合のみ `dryRun: false` に変更してください。
+
+別の Files 共有への移動も含む複数ルールの例は
+[settings.example.json](./settings.example.json) を参照してください。
+
+#### 設定ファイルの準備と検証
+
 リポジトリルートで実行します。
 
 ```powershell

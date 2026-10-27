@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "dryRun": true,
+  "maxFilesPerRun": 1000,
+  "rules": [
+    {
+      "id": "documents-to-blob",
+      "source": {
+        "account": "sourcestorage",
+        "share": "documents",
+        "path": "completed"
+      },
+      "destination": {
+        "kind": "blob",
+        "account": "archivestorage",
+        "container": "archive",
+        "path": "documents",
+        "tier": "Cool"
+      },
+      "olderThanDays": 90
+    }
+  ]
+}
