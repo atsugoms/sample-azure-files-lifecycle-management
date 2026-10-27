@@ -3,7 +3,14 @@
 Azure Files の指定ディレクトリを定期走査し、一定期間更新されていないファイルを、
 事前に用意した Azure Blob Storage または別の Azure Files 共有へ移動するサンプルです。
 
-**Node.js 24 / TypeScript、Azure Container Apps Jobs、Azure App Configuration** を使用します。
+主な構成として以下を利用します。
+
+- アプリ
+  - Node.js 24 / TypeScript
+- インフラ
+  - Azure Container Apps Jobs
+  - Azure App Configuration
+
 Web UI、進捗 DB、処理台帳、履歴画面、自動復旧・自動再開は実装していません。
 実行中の情報はメモリのみで保持し、運用ログを標準出力へ JSON 形式で出力します。
 
