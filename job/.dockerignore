@@ -3,3 +3,5 @@ dist
 test
 .env
 *.log
+data
+*.sqlite*

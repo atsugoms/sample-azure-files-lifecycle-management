@@ -13,6 +13,18 @@ app_config_label        = "production"
 job_timeout_seconds     = 3300
 replica_timeout_seconds = 3600
 
+# Local SQLite is the backwards-compatible default, but is not persistent across executions.
+# For Azure history persistence, set postgres and provide a separate Entra administrator.
+# PostgreSQL + NAT Gateway incur charges even while the job is stopped.
+history_db_provider           = "sqlite"
+postgres_admin_object_id      = ""
+postgres_admin_principal_name = ""
+postgres_admin_principal_type = "Group"
+postgres_vnet_cidr            = "10.42.0.0/16"
+postgres_sku_name             = "B_Standard_B1ms"
+# Set true only after running the reviewed postgres_bootstrap_sql output.
+postgres_bootstrap_completed = false
+
 # Input uses control-plane /shares/ IDs; Terraform converts Files role scopes
 # to /fileshares/ as required by FileREST OAuth (source and destination).
 source_file_share_resource_ids = [

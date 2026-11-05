@@ -11,14 +11,23 @@ Azure Files の指定ディレクトリを定期走査し、一定期間更新�
   - Azure Container Apps Jobs
   - Azure App Configuration
 
-Web UI、進捗 DB、処理台帳、履歴画面、自動復旧・自動再開は実装していません。
-実行中の情報はメモリのみで保持し、運用ログを標準出力へ JSON 形式で出力します。
+実行履歴・ファイル単位の処理結果・進捗は、既定でアプリのローカルSQLiteファイルへ保存します。
+DB操作は共通のRepositoryインターフェースで分離し、PostgreSQLへ切り替えることもできます。
+CLIで履歴を参照し、実行IDを指定して未処理分を再開できます。
+処理途中のファイルは「要確認」とし、自動復旧・上書き・削除はしません。Web UIはありません。
+運用ログは引き続き標準出力へJSON形式で出力します。
+
+**Azureで履歴を継続保存する場合は、Terraformで`history_db_provider = "postgres"`を選択します。**
+プライベート接続のPostgreSQL Flexible Serverを作成し、JobはManaged Identityで認証します。
+DB管理者による事前のロール・スキーマ作成が必要です。手順は[インフラ構築](infra/README.md)を参照してください。
+既定のSQLiteはコンテナーローカルのため、実行をまたいで保持されません。
+SQLiteファイルをAzure Files共有に直接配置しないでください。
 
 ## 構成
 
 | ディレクトリ | 内容 |
 | --- | --- |
-| `infra/` | Terraform。Container Apps Job、実行環境、App Configuration、ACR、Managed Identity、RBAC、ログ |
+| `infra/` | Terraform。Job、App Configuration、ACR、Managed Identity、RBAC、ログ、任意のPostgreSQLとネットワーク |
 | `job/` | 1 回実行して終了するコンテナーバッチ、設定例、テスト、設定・運用マニュアル |
 
 設定は App Configuration の **1 つの JSON 値**として読み込みます。
@@ -245,7 +254,8 @@ terraform apply .\schedule.tfplan
 ## 重要な制約
 
 - **同名ファイルは上書きしません。** 移動先に既存データがある場合はエラーとし、元を残します。
-- 進捗を保存しないため、コピー後・削除前の停止は自動修復しません。次回は競合として報告します。
+- 進捗は保存しますが、コピー後・削除前などの停止は自動修復しません。
+  同じ実行の再開では処理途中を「要確認」として除外します。新規実行では移動先の存在を競合として報告します。
 - **Azure Files のファイルリースは無期限です。** 通常終了・処理エラー・SIGTERM では解除を試みますが、
   強制終了や通信断で残ることがあります。ジョブ停止確認後の手動解除が必要です。
 - Files 移動先ではファイルの ACL、属性、作成時刻、最終書き込み時刻を設定します。
@@ -264,6 +274,18 @@ terraform apply .\schedule.tfplan
   実行中は対象リソースの削除・リース解除・移動先の外部更新を行わないでください。
 
 ## 開発・検証
+
+履歴の参照例です。`job`ディレクトリで実行します。
+
+```powershell
+npm start -- history list
+npm start -- history show "<runId>" --limit 50 --offset 0
+npm start -- history progress "<runId>"
+npm start -- resume "<runId>"
+```
+
+ローカルSQLite、PostgreSQL接続、強制終了後の`--recover`の条件は
+[実行履歴と進捗](job/README.md#実行履歴と進捗)を参照してください。
 
 ```powershell
 Set-Location job

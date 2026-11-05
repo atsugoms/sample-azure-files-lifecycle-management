@@ -9,6 +9,8 @@ RUN npm run build && npm prune --omit=dev
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
+ENV HISTORY_SQLITE_PATH=/app/data/history.sqlite
+RUN mkdir -p /app/data && chown node:node /app/data
 COPY --from=build --chown=node:node /app/package.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist/src ./dist/src

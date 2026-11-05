@@ -1,0 +1,17 @@
+\set ON_ERROR_STOP on
+-- Run once as the configured Entra administrator, initially connected to postgres.
+BEGIN;
+SELECT * FROM pg_catalog.pgaadauth_create_principal_with_oid(
+  'archive_job', '${job_principal_id}', 'service', false, false
+);
+COMMIT;
+
+\connect archive_history
+BEGIN;
+REVOKE ALL ON DATABASE archive_history FROM PUBLIC;
+GRANT CONNECT ON DATABASE archive_history TO CURRENT_USER;
+GRANT CONNECT ON DATABASE archive_history TO archive_job;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+CREATE SCHEMA archive;
+GRANT USAGE, CREATE ON SCHEMA archive TO archive_job;
+COMMIT;

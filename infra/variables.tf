@@ -188,3 +188,80 @@ variable "tags" {
   default     = {}
   nullable    = false
 }
+
+variable "history_db_provider" {
+  description = "sqlite keeps container-local history; postgres provisions a private Flexible Server and Entra connection."
+  type        = string
+  default     = "sqlite"
+  nullable    = false
+  validation {
+    condition     = contains(["sqlite", "postgres"], var.history_db_provider)
+    error_message = "history_db_provider must be sqlite or postgres."
+  }
+}
+
+variable "postgres_admin_object_id" {
+  description = "Separate Entra administrator object ID; required for postgres. Never use the job identity."
+  type        = string
+  default     = ""
+  nullable    = false
+  validation {
+    condition     = var.history_db_provider != "postgres" || can(regex("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.postgres_admin_object_id))
+    error_message = "PostgreSQL requires an administrator Entra object UUID."
+  }
+}
+
+variable "postgres_admin_principal_name" {
+  description = "Administrator's Entra login/display name; required for postgres."
+  type        = string
+  default     = ""
+  nullable    = false
+  validation {
+    condition     = var.history_db_provider != "postgres" || length(trimspace(var.postgres_admin_principal_name)) > 0
+    error_message = "PostgreSQL requires the administrator's Entra principal name."
+  }
+}
+
+variable "postgres_admin_principal_type" {
+  description = "Entra administrator type, preferably a dedicated operations group."
+  type        = string
+  default     = "Group"
+  nullable    = false
+  validation {
+    condition     = contains(["Group", "User", "ServicePrincipal"], var.postgres_admin_principal_type)
+    error_message = "Use Group, User or ServicePrincipal."
+  }
+}
+
+variable "postgres_vnet_cidr" {
+  description = "Canonical private IPv4 /16 for the new VNet. Check overlap before enabling postgres."
+  type        = string
+  default     = "10.42.0.0/16"
+  nullable    = false
+  validation {
+    condition     = can(cidrnetmask(var.postgres_vnet_cidr)) && can(regex("^(10\\.[0-9]+|172\\.(1[6-9]|2[0-9]|3[01])|192\\.168)\\.0\\.0/16$", var.postgres_vnet_cidr))
+    error_message = "Use a canonical RFC1918 IPv4 /16 such as 10.42.0.0/16."
+  }
+}
+
+variable "postgres_sku_name" {
+  description = "Regional PostgreSQL Flexible Server SKU; B1ms is sample-only, without HA."
+  type        = string
+  default     = "B_Standard_B1ms"
+  nullable    = false
+  validation {
+    condition     = can(regex("^(B|GP|MO)_Standard_[A-Za-z0-9_]+$", var.postgres_sku_name))
+    error_message = "Use a PostgreSQL SKU such as B_Standard_B1ms or GP_Standard_D2s_v3."
+  }
+}
+
+variable "postgres_bootstrap_completed" {
+  description = "Set true only after an administrator executes postgres_bootstrap_sql over the private network."
+  type        = bool
+  default     = false
+  nullable    = false
+  validation {
+    condition     = var.history_db_provider != "postgres" || !var.create_job || var.postgres_bootstrap_completed
+    error_message = "Complete postgres_bootstrap_sql and set postgres_bootstrap_completed=true before creating the PostgreSQL-backed job."
+  }
+}

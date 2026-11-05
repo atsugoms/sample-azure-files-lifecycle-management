@@ -3,7 +3,12 @@
 AzureRM v4 と Terraform 1.9 以降で、Container Apps Job、実行環境、ACR Basic、
 App Configuration、ユーザー割り当てマネージド ID、RBAC を作成します。
 Log Analytics は標準出力とプラットフォーム ログ用で、保持期間は 30 日です。
-UI、アプリケーション用のデータベース、進捗管理、履歴保存サービスは作成しません。
+既定はSQLiteで、UIや履歴保存用の永続ボリュームは作成しません。
+SQLite履歴はコンテナーローカルのため、実行をまたいで残りません。
+`history_db_provider = "postgres"`で、プライベート接続のPostgreSQL Flexible Server、
+専用DB、Entra管理者、VNet、DNS、NAT Gatewayを追加できます。
+アプリの接続にはJobのManaged Identityを使い、DBパスワードを作成・保存しません。
+SQLiteファイルをAzure Files共有へ直接配置しないでください。
 既存の Storage アカウント、Files 共有、Blob コンテナーの作成や変更は行いません。
 
 ## 前提条件
@@ -15,6 +20,8 @@ UI、アプリケーション用のデータベース、進捗管理、履歴保
 - 設定を更新する運用者の App Configuration Data Owner 権限。Contributor だけでは設定値を更新できません。
   `configuration_operator_object_ids` に運用者の **オブジェクト ID** を指定できます。
 - イメージ発行者の AcrPush 権限。実行用 ID の権限は AcrPull のみです。
+- PostgreSQLを選ぶ場合は、Jobとは別のEntra管理者（推奨は運用グループ）と、
+  初期設定用の`psql`、VNetへの接続とプライベートDNS名前解決が必要です。
 - 設定 JSON 内の account/share/container が指す既存の Files 共有と Blob コンテナーを RBAC 入力にすべて指定します。
   入力は HTTPS URL ではなく **共有／コンテナー単位の ARM リソース ID** です。
   Files は通常の管理プレーン ID (`/fileServices/default/shares/<share>`) を入力し、
@@ -29,6 +36,7 @@ ACR のイメージ発行と、実際の Container Apps Job での Dry-run が�
 実際のコピー・削除は未検証であり、定期実行も無効です。
 設定は `archive:settings` の単一キーを参照します。
 以下の apply は実リソースと課金を発生させるため、plan を確認してから利用してください。
+上記の実環境検証は従来の構成の結果です。新しいPostgreSQL・Entra接続構成のAzureデプロイと接続確認は未実施です。
 
 ## 1. 基盤のみ作成
 
@@ -59,6 +67,71 @@ $image = terraform output -raw container_image
 リソース グループ名を固定したい場合は `resource_group_name` を指定します。
 省略時は `<name_prefix>-rg` です。既存グループを指定する場合は、所有範囲を確認して
 `azurerm_resource_group.main` に import してから plan を実行してください。
+
+### PostgreSQLを選ぶ場合
+
+基盤のplan/apply前に、`terraform.tfvars`で次を設定します。管理者にはJobのManaged Identityを指定しないでください。
+
+```hcl
+history_db_provider           = "postgres"
+postgres_admin_object_id      = "<Entra-admin-object-id>"
+postgres_admin_principal_name = "<Entra-admin-group-name>"
+postgres_admin_principal_type = "Group"
+postgres_vnet_cidr            = "10.42.0.0/16"
+postgres_sku_name             = "B_Standard_B1ms"
+postgres_bootstrap_completed = false
+create_job                   = false
+enable_schedule              = false
+```
+
+CIDRは既存・接続予定ネットワークと重ならないプライベートIPv4 `/16`を指定します。
+既定ではJob用`10.42.0.0/23`とDB用`10.42.2.0/27`へ分割します。
+PostgreSQL 16、初期32 GiB、自動拡張、バックアップ7日、HAなし・地理冗長なしのサンプル構成です。
+自動拡張後の縮小を防ぐため、Terraformは作成後の`storage_mb`の差分を無視します。
+本番ではSKU、可用性、保持・復元要件、容量監視を別途設計してください。
+**PostgreSQL・NAT Gateway・Public IPはJob停止中も課金されます。**
+
+既存環境でSQLiteから切り替えると、Container Apps EnvironmentのVNet統合に伴う**置き換え**が発生します。
+実行を止め、planの削除・再作成を確認してください。逆方向の切り替えはDBやネットワークの削除を伴うため、
+履歴の退避・復元方針を確認せず適用しないでください。SQLiteの既存履歴は自動移行しません。
+
+基盤作成後、設定したEntra管理者としてDBの初期設定を行います。Azure RBACの割り当てだけではDBログインは作成されません。
+次の操作は**管理者用ホスト**で実行します。新しいVNetへのピアリングやVPNと適切なDNS転送などを用意してください。
+管理者用ホスト自体やその接続経路は本Terraformの管理対象外です。通常のCloud Shellやインターネット上のPCからは直接接続できません。
+
+`infra`ディレクトリでSQLを出力し、内容を確認してから実行します。
+トークンを画面へ出力せず、Gitや共有ログへ保存しないでください。
+CAファイルは[公式TLS手順](https://learn.microsoft.com/azure/postgresql/security/security-tls)に従って準備します。
+
+```powershell
+$pgHost = terraform output -raw postgres_host
+terraform output -raw postgres_bootstrap_sql | Set-Content -Encoding ascii .\bootstrap-postgres.sql
+# bootstrap-postgres.sqlを確認。Jobのprincipal IDを一般ロールarchive_jobへ紐づけます。
+$env:PGUSER = "<configured-admin-login>"
+$env:PGSSLROOTCERT = "C:\certificates\postgres-ca-bundle.pem"
+try {
+    $env:PGPASSWORD = az account get-access-token `
+        --resource https://ossrdbms-aad.database.windows.net `
+        --query accessToken --output tsv
+    if ($LASTEXITCODE -ne 0) { throw "Failed to obtain the PostgreSQL administrator token" }
+    psql "host=$pgHost port=5432 dbname=postgres sslmode=verify-full" --file .\bootstrap-postgres.sql
+    if ($LASTEXITCODE -ne 0) { throw "PostgreSQL bootstrap failed; inspect the database before retrying" }
+} finally {
+    if (Test-Path Env:\PGPASSWORD) { Remove-Item Env:\PGPASSWORD }
+}
+```
+
+最初は`postgres` DBでEntraログインを作り、続けて`archive_history` DBへ接続します。
+JobにはDBのCONNECTと専用`archive`スキーマのUSAGE/CREATEだけを与え、
+管理者にはしません。4テーブルとインデックスはアプリが初回接続時に承認済みの定義で作成します。
+参照CLIも未初期化DBではテーブルを作るため、単なる接続確認として無断で実行しないでください。
+
+SQLは既存のロール・スキーマを黙って流用せず、競合やエラーで停止します。
+ロール作成とDB内の設定は別トランザクションなので、後半だけ失敗した場合は管理者が状態を確認して続きを実施します。
+無条件の再実行、既存ロールの削除・権限上書きはしないでください。
+成功後に`postgres_bootstrap_completed = true`へ変更し、以降のイメージ登録・手動Job作成へ進みます。
+このフラグは運用者の確認であり、TerraformがSQLの成功を検証するものではありません。
+Managed Identityを再作成した場合も、管理者が新しいprincipal IDとDBロールの紐づけを確認・更新してください。
 
 ## 2. イメージと設定を登録
 
@@ -101,6 +174,7 @@ Set-Location .\infra
 
 `terraform.tfvars` の `create_job = true` に変更します。
 `enable_schedule = false` を維持します。
+PostgreSQLの場合はDB初期設定を完了し、`postgres_bootstrap_completed = true`も必要です。
 
 ```powershell
 terraform plan -out=manual.tfplan
@@ -142,12 +216,19 @@ terraform apply .\schedule.tfplan
 | `APP_CONFIG_LABEL` | 既定 `production` |
 | `AUTH_MODE` | `managed-identity` |
 | `JOB_TIMEOUT_SECONDS` | 既定 `3300`。replica timeout (既定 `3600`) より小さい正整数 |
+| `HISTORY_DB_PROVIDER` | `sqlite`または`postgres` |
+| `HISTORY_POSTGRES_AUTH_MODE` | PostgreSQL時は`entra` |
+| `HISTORY_POSTGRES_HOST` | 作成したサーバーのFQDN |
+| `HISTORY_POSTGRES_DATABASE` / `HISTORY_POSTGRES_USER` | `archive_history` / `archive_job` |
+| `HISTORY_POSTGRES_SCHEMA` / `HISTORY_POSTGRES_TLS` | `archive` / `verify-full` |
 
 `job_environment` 出力には上記の非機密値が含まれます。その他の主な出力は
 `resource_group_name`、`container_registry_name`、`container_registry_login_server`、
 `container_image`、`app_configuration_name`、`app_config_endpoint`、
 `job_identity_client_id`、`job_identity_principal_id`、`job_name`、`job_id`、
 `log_analytics_workspace_id` です。Job 作成前の `job_name` と `job_id` は null です。
+PostgreSQL時には`postgres_host`、`postgres_vnet_id`、`job_egress_ip`、
+`postgres_bootstrap_sql`を出力します。SQLite時はこれらを設定しません。
 
 ## 権限とネットワーク
 
@@ -178,15 +259,20 @@ Blob の `.../blobServices/default/containers/<container>` はこの変換の対
 Managed Identity による Dry-run のデータ読み取りを確認しました。
 実移動に必要なリース・コピー・削除の受け入れ確認は別途必要です。
 
-Job は ingress を公開しません。アウトバウンドは公開 HTTPS エンドポイントを使用し、
+Job は ingress を公開しません。ACR、App Configuration、Storageへの通信は公開 HTTPS エンドポイントを使用し、
 ACR の管理者認証と App Configuration のローカル キー認証を無効にしています。
 既存 Storage の HTTPS 必須／TLS 1.2 以降の設定を確認してください。本 Terraform は既存
 Storage の設定を変更しません。Storage ファイアウォールは Job からの接続を許可する必要が
 あります。RBAC だけではネットワーク制限を回避できず、「信頼されたサービス」の設定だけで
 この Job の通信が許可されるとは限りません。
 
-この最小サンプルには VNet 統合、Private Endpoint、固定送信 IP はありません。
-プライベート接続が必須の環境では、本構成をそのまま利用せず VNet/DNS/送信経路を設計してください。
+SQLite構成にはVNet統合や固定送信IPがありません。
+PostgreSQL構成はVNetと専用サブネットへ統合し、DBへはプライベートDNS経由でTCP 5432を使用します。
+DBの公開アクセスとパスワード認証は無効です。両サブネットの暗黙の外向き接続を無効にし、
+NAT Gatewayと固定Public IPで必要なEntra認証・その他の外向き通信を確保します。
+NATは外向き専用であり、DBのインターネット公開にはなりません。
+NSGや追加の送信制限は作成しません。組織の制限がある場合は、Entra認証・DB・ACR等の必要経路を確認してください。
+この構成でもStorage用Private Endpointは作成しません。
 組織の Azure Policy が Storage の `publicNetworkAccess` を `Disabled` に変更する場合、
 RBAC の追加や再ログインでは解決しません。公開接続の例外が承認されていなければ、
 VNet 接続の Container Apps 環境、Files/Blob 用 Private Endpoint と Private DNS を用意してください。
@@ -229,9 +315,9 @@ Free の使用可能数、要求数、設定容量の制限も確認してくだ
   実環境の Dry-run は走査 10 件・候補 6 件・移動 0 件・失敗 0 件で成功しました。
   実行前後のスナップショット比較で、元ファイルの不変と両移動先が空であることを確認しました。
 - 実装時は Terraform 1.16.2 / AzureRM 4.81.0 で init、fmt、validate が成功しました。
-  `terraform test` も mocked provider を使った 11 件が成功しました。既定の Job 未作成、
+  `terraform test` も mocked provider を使った19件が成功しました。既定の Job 未作成、
   手動／日次トリガー、Files のデータプレーン スコープへの変換と重複排除、
-  Blob スコープの維持、入力エラーを Azure へのアクセスなしで確認しています。
+  Blob スコープの維持、PostgreSQLのプライベート接続・Entra設定・段階作成・入力エラーをAzureへのアクセスなしで確認しています。
   `.terraform.lock.hcl` は再現性のためコミット対象です。
 
 参照:
@@ -239,4 +325,8 @@ Free の使用可能数、要求数、設定容量の制限も確認してくだ
 [App Configuration](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/app_configuration) /
 [ACR](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry) /
 [スケジュールと実行](https://learn.microsoft.com/azure/container-apps/jobs) /
-[Files OAuth](https://learn.microsoft.com/azure/storage/files/authorize-oauth-rest)
+[Files OAuth](https://learn.microsoft.com/azure/storage/files/authorize-oauth-rest) /
+[PostgreSQL Entra](https://learn.microsoft.com/azure/postgresql/security/security-entra-configure) /
+[DBロール](https://learn.microsoft.com/azure/postgresql/security/security-manage-entra-users) /
+[PostgreSQL Flexible Server](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/postgresql_flexible_server) /
+[Container Apps VNet](https://learn.microsoft.com/azure/container-apps/custom-virtual-networks)

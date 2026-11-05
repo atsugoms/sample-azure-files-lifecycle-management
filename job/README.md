@@ -3,7 +3,8 @@
 ## 実装範囲
 
 App Configuration からルールを読み、Azure Files を再帰走査して Blob または別の Files 共有へ移動します。
-Web UI、DB、履歴機能、進捗ファイル、キュー、永続的な再試行台帳はありません。
+実行履歴・ファイル結果・進捗をローカルSQLiteへ保存し、CLIで参照・明示的に再開できます。
+PostgreSQLへ切り替えるアダプターもあります。Web UI、キュー、自動再試行はありません。
 SDK の短い通信リトライはありますが、ジョブ全体の自動リトライは Terraform の初期設定で無効です。
 
 ロックは排他制御のために使用します。これは進捗保存ではありませんが、ファイルリース自体は
@@ -106,7 +107,8 @@ Blob 名は `documents/2024/report.pdf` になります。
 
 `maxFilesPerRun` は走査件数・容量の上限ではありません。非対象ファイルが多ければ走査は続きます。
 上限を超える候補が見つかった場合は `limit_reached` を記録して終了コード 1 になります。
-進捗カーソルはないため毎回先頭から走査します。競合が多い場合は先に手動解消してください。
+進捗カーソルはないため毎回先頭から走査します。同じ実行IDの再開では処理済みを照合して除外し、
+各再開で新たに処理する候補に上限を適用します。競合が多い場合は先に手動解消してください。
 大規模環境では対象パスを絞り、実行時間を測定してから日次運用してください。
 
 ### 2. Portal で登録する方法
@@ -173,6 +175,15 @@ az appconfig kv show --name $storeName --auth-mode login `
 | `AUTH_MODE` | `managed-identity`。ローカル検証のみ `azure-cli` |
 | `AZURE_CLIENT_ID` | `managed-identity` 時に必須。ユーザー割り当て ID の client ID |
 | `JOB_TIMEOUT_SECONDS` | `3300`。整数 1～86400。Container Apps の replica timeout より短くする |
+| `HISTORY_DB_PROVIDER` | `sqlite`。`postgres`に切り替え可能 |
+| `HISTORY_SQLITE_PATH` | `./data/history.sqlite`。コンテナー内は`/app/data/history.sqlite` |
+| `HISTORY_POSTGRES_AUTH_MODE` | `password`（既定）または`entra` |
+| `HISTORY_POSTGRES_URL` | `password`時に必須。`postgresql://<user>:<password>@<host>:5432/<database>` |
+| `HISTORY_POSTGRES_HOST` | `entra`時に必須。`<server>.postgres.database.azure.com` |
+| `HISTORY_POSTGRES_DATABASE` / `HISTORY_POSTGRES_USER` | `entra`時に必須。Terraformは`archive_history` / `archive_job`を設定 |
+| `HISTORY_POSTGRES_SCHEMA` | 任意。小文字英数字と`_`のSQL識別子（先頭は英字または`_`、最大63文字）。Terraformは`archive` |
+| `HISTORY_POSTGRES_TLS` | `verify-full`。ローカル検証のみ明示的に`disable`を選択可能 |
+| `HISTORY_POSTGRES_CA_PATH` | 任意。PostgreSQLのサーバー証明書検証に使うCAファイル |
 
 コンテナーでは Managed Identity のみを使用し、開発者の認証情報へのフォールバックはしません。
 ローカルは明示的な `AzureCliCredential` を使います。
@@ -238,15 +249,181 @@ Blob 移動先には **Storage Blob Data Contributor** が必要です。
 | `fatal` | 設定取得・走査・タイムアウト等でジョブを中断 |
 
 終了コードは、全件成功／対象なし／正常な Dry-run が `0`、失敗または上限到達が `1` です。
-`summary` は進捗台帳ではなくログで、次回実行からは読みません。
+`summary` ログ自体は再開に使用せず、DBの台帳を使用します。
+再開した試行に失敗がなくても、同じ実行の過去に失敗・要確認が残っていれば終了コードは1です。
 削除の応答を受信できなかった場合や、削除後のリース解除が失敗した場合も `file_failed` になります。
 その場合は元が既に削除されている可能性があるため、ログだけで判断せず両側の実データを確認します。
-パスに個人情報等を含む場合は、Log Analytics の閲覧権限・保持期間も管理してください。
+パスに個人情報等を含む場合は、Log Analyticsと履歴DBの閲覧権限・保持期間も管理してください。
+
+## 実行履歴と進捗
+
+### ローカルSQLite
+
+引数なしの`npm start`は新規実行です。既定の`job\data\history.sqlite`へ履歴を保存します。
+パスは**現在の作業ディレクトリ基準**なので、異なる場所から実行する場合は絶対パスを設定してください。
+DBファイルとそのディレクトリは単一ホストのローカルディスク上に置きます。
+
+```powershell
+Set-Location job
+$env:HISTORY_DB_PROVIDER = "sqlite"
+$env:HISTORY_SQLITE_PATH = Join-Path (Get-Location) "data\history.sqlite"
+npm run build
+npm start
+```
+
+DB接続・スキーマ初期化・保存の失敗はジョブを停止し、別DBやメモリへ自動フォールバックしません。
+設定取得・検証より前の失敗はJSONログのみです。設定検証後、接続事前確認・走査の前に履歴を作成します。
+DBには設定スナップショットとハッシュ、判定基準日時、設定キー・ラベル・ETagを保存します。
+設定は秘密情報を含めないでください。接続URLやパスワードは履歴へ保存しません。
+
+SQLiteはWALと完全同期を使用し、ファイル結果と試行集計は短いトランザクションで保存します。
+コピー中に長時間のDBトランザクションは保持しません。SQLiteファイルをAzure Files、
+SMB/NFS共有、ネットワークドライブに置かないでください。複数ホストからの利用にはPostgreSQLを使います。
+
+Dockerは非rootの`node`ユーザーで`/app/data`へ書き込みます。
+**現行TerraformのContainer Apps Jobsには永続ボリュームがありません。**
+コンテナーのローカル履歴は実行をまたいで保持されず、同じDBを開けなければ再開もできません。
+Azureでの継続保存には、[TerraformのPostgreSQL構成](../infra/README.md#postgresqlを選ぶ場合)を選択します。
+
+### CLIでの参照
+
+参照コマンドはApp Configuration・Storageへの接続を要求しません。結果はJSONで出力します。
+SQLiteとパスワード認証のPostgreSQLではAzure認証も不要です。
+Entra認証のPostgreSQLではDB接続用のAzure認証とプライベートネットワーク到達性が必要です。
+
+```powershell
+npm start -- history list --limit 50 --offset 0
+npm start -- history show "<runId>" --limit 50 --offset 0
+npm start -- history progress "<runId>"
+```
+
+`list`は新しい実行順です。`show`は設定・実行状態と、指定ページの試行履歴・ファイル台帳を返します。
+`--limit`は1～1000、既定50、`--offset`は0以上です。試行とファイルには同じページ指定を適用します。
+ファイルは安定した識別キー順です。ページを送ってすべての要確認ファイルを調べてください。
+`progress`は最新試行の集計、論理実行全体の状態別ファイル件数、処理中ファイルの段階・バイト数を返します。
+一覧が同時更新されるとページ境界が変わる場合があります。
+
+転送バイト数はコピー段階の値であり、検証・公開・削除の完了を意味しません。
+転送中は約1秒ごとと最終ブロックで保存し、段階遷移・結果も保存します。
+走査件数は100件ごと、候補開始・結果・試行終了でも保存します。
+全対象数を事前確定しないため、総件数・全体完了率・残り時間は表示しません。
+再走査した件数は各試行の観測値です。論理実行全体の処理件数は台帳を集計し、試行の走査数を合算しません。
+
+| 実行状態 | 意味 |
+| --- | --- |
+| `running` | 実行中、または強制終了後に未確定の試行が残っている |
+| `succeeded` | 全体に失敗・要確認・未完了がない |
+| `completed_with_errors` | 一部ファイルに失敗・要確認が残っている |
+| `limited` | 候補処理上限に到達。未処理分を再開可能 |
+| `interrupted` | シグナル・期限切れ等で中断 |
+| `failed` | 接続事前確認、走査、DB保存等の致命的失敗 |
+
+ファイル状態は`processing`、`moved`、`dryRun`、`changed`、`failed`、`needs_review`です。
+未処理ファイルはまだ台帳にありません。実移動の副作用より前に`processing`を保存します。
+
+### 明示的な再開
+
+```powershell
+npm start -- resume "<runId>"
+# 強制終了でrunningの試行が残った場合のみ、旧プロセス停止を確認した後に指定
+npm start -- resume "<runId>" --recover
+```
+
+同じ論理実行IDの下に新しい試行IDを作成し、過去の試行履歴を残します。
+`attempt_started`ログに試行IDを出力し、エンジンのログにも付与します。
+再開は保存した設定・判定基準日時を使い、App Configurationの現在値を読み直しません。
+現在の認証環境変数は必要です。Dry-runから実移動へ変える場合や設定を変える場合は新規実行にします。
+
+- 先頭から再走査し、同じルール・パス・バージョンの処理済みファイルを除外します。
+- 失敗・要確認のパスはバージョンが変わっていても除外します。自動再試行しません。
+- `processing`が残っていれば、再走査で元が見つからなくても`needs_review`へ変更します。
+- 再開の候補上限は新たに処理する分に適用します。除外分は上限を消費しません。
+- 成功済み実行の再開や同一実行の二重再開は拒否します。
+
+SQLiteの異常終了回復は、記録されたホスト名が現在と一致し、所有プロセスが存在しないと確認できる場合だけ許可します。
+PID再利用やホスト名変更で確認できない場合も拒否します。稼働中のプロセスから自動的に所有権を奪いません。
+PostgreSQLは専用接続のセッションadvisory lockで同一実行の二重起動を防ぎます。
+異常終了後はロック解放を確認でき、かつ`--recover`を指定した場合に未完了試行を回復します。
+これらは**同一実行ID**の保護です。異なる実行ID間の対象共有全体をロックする機能ではありません。
+
+DBとAzure Storageにまたがるトランザクション・exactly-onceは保証しません。
+元削除成功後・DB結果保存前の停止も成功と推測せず「要確認」にします。
+台帳だけで削除可否を判断せず、以下の手動復旧で実データとリースを確認してください。
+台帳の失敗・要確認を手動で成功へ変更するCLIはありません。復旧後に再処理する場合は新規実行とします。
+
+### PostgreSQLへの切り替え
+
+通常のPostgreSQLへパスワードで接続する例です。
+
+```powershell
+$env:HISTORY_DB_PROVIDER = "postgres"
+$env:HISTORY_POSTGRES_AUTH_MODE = "password"
+# 接続URLはシークレット管理から環境変数へ注入し、Gitや共有ログへ保存しない
+$env:HISTORY_POSTGRES_URL = "<secret PostgreSQL URL>"
+$env:HISTORY_POSTGRES_TLS = "verify-full"
+# 独自CAが必要な場合のみ
+$env:HISTORY_POSTGRES_CA_PATH = "C:\certificates\postgres-ca.pem"
+npm start -- history list
+```
+
+DBは事前作成し、接続先スキーマにテーブル・インデックスを作成できる権限を用意します。
+URL内のユーザー名・パスワードは必要に応じてURLエンコードしてください。
+スキーマ指定には`HISTORY_POSTGRES_SCHEMA`を使用できます。省略時は接続URLまたはサーバーの既定値を使います。
+スキーマ環境変数と接続URLの`options`は併用できません。
+TLSは既定でホスト名と証明書チェーンを検証します。ローカル検証でのみ`HISTORY_POSTGRES_TLS=disable`を使います。
+接続URLの`sslmode`等のSSLパラメーターは設定の競合を避けるため拒否します。
+接続タイムアウトは10秒、SQL文のタイムアウトは15秒です。接続断で実行を続行しません。
+SQLiteとPostgreSQLは同じ履歴API・スキーマバージョンを使いますが、**保存先を切り替えても既存履歴は移送しません。**
+DB間のデータ移行機能は含みません。
+
+Azure PostgreSQLのEntra認証は次の設定を使います。TerraformがJobへ同じ値を自動設定します。
+DBのロールと専用スキーマは、[管理者による初期設定](../infra/README.md#postgresqlを選ぶ場合)で先に作成します。
+
+```powershell
+$env:HISTORY_DB_PROVIDER = "postgres"
+$env:HISTORY_POSTGRES_AUTH_MODE = "entra"
+$env:HISTORY_POSTGRES_HOST = "<server>.postgres.database.azure.com"
+$env:HISTORY_POSTGRES_DATABASE = "archive_history"
+$env:HISTORY_POSTGRES_USER = "archive_job"
+$env:HISTORY_POSTGRES_SCHEMA = "archive"
+$env:HISTORY_POSTGRES_TLS = "verify-full"
+# Managed Identityを利用する実行環境の例。client IDはJob用IDの値
+$env:AUTH_MODE = "managed-identity"
+$env:AZURE_CLIENT_ID = "<job-identity-client-id>"
+npm start -- history list
+```
+
+Entraモードでは接続URLを設定せず、TLS検証を無効にできません。対象はAzureパブリッククラウドの5432番ポートです。
+接続時に`https://ossrdbms-aad.database.windows.net/.default`のトークンを取得し、
+パスワードとしてメモリ内だけで渡します。トークンはDB・ログ・Terraform stateへ保存しません。
+接続中の定期的な再認証は不要で、接続し直すときに新たに取得します。接続断で処理を自動再開することはありません。
+ローカルから`AUTH_MODE=azure-cli`を使う場合は、そのユーザー自身に対応するDBログインと権限、
+およびプライベートネットワークとDNSへの接続が必要です。`archive_job`はJob用Managed Identityに紐づくため、
+開発者のAzure CLIトークンではそのままログインできません。DB管理者権限を通常のアプリ実行に流用しないでください。
+
+履歴の自動削除・保持期限はありません。ファイルパス・設定を含むため、DBファイルやDBユーザーのアクセス権を制限し、
+容量・バックアップを管理してください。SQLiteのバックアップは全実行停止・接続終了後に行うか、
+SQLite対応のバックアップ方式を使い、稼働中にDBファイルだけをコピーしないでください。
+
+### PostgreSQL契約テスト
+
+通常の`npm test`はSQLiteと既存のAzureモックを検証し、接続先未指定時はPostgreSQLテストをスキップします。
+PostgreSQLも検証する場合は、テスト用DBとスキーマ作成権限を持つ接続先を明示してください。
+テストは一意な`archive_test_*`スキーマのみを作成・削除し、既存テーブルは変更しません。
+
+```powershell
+$env:HISTORY_TEST_POSTGRES_URL = "<secret test database URL>"
+$env:HISTORY_TEST_POSTGRES_TLS = "verify-full"
+# 独自CAが必要な場合のみ: HISTORY_TEST_POSTGRES_CA_PATH
+# ローカルの隔離DBでTLSを使わない場合のみ "disable"
+npm test
+```
 
 ## 異常終了後の復旧
 
-**自動再開・既存コピーの自動流用はしません。** 次回は再走査し、
-元が消えていれば対象外、元と移動先が両方あれば競合、リースが残っていれば失敗になります。
+**途中コピーの自動復旧・既存コピーの自動流用はしません。**
+同じ実行の再開では途中処理を「要確認」として除外します。新規実行では再走査し、
+元と移動先が両方あれば競合、リースが残っていれば失敗になります。
 移動先が存在するだけでは、コピーの完全性を保証できません。
 
 1. スケジュールを無効化し、すべての execution が終了していることを確認します。

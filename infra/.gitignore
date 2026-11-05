@@ -37,4 +37,7 @@ override.tf.json
 .terraformrc
 terraform.rc
 
+# Environment-specific principal bootstrap exported from Terraform.
+bootstrap-postgres.sql
+
 # End of https://www.toptal.com/developers/gitignore/api/terraform

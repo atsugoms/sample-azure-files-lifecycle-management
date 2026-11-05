@@ -192,3 +192,20 @@ test("pre-aborted executions do not touch storage", async () => {
   await assert.rejects(moveFile(f.storage, sourceFile, cutoff, signal));
   assert.deepEqual(f.calls, []);
 });
+
+test("progress reports phases and bytes and throttles per-block notifications", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: now.getTime() });
+  const size = BLOCK_SIZE * 3 + 7;
+  const info = { ...sourceFile, size };
+  const f = fake({ data: Buffer.alloc(size, 19), locked: info });
+  const progress: { phase: string; bytes: number }[] = [];
+  await moveFile(f.storage, info, cutoff, new AbortController().signal, async (phase, bytes) => {
+    progress.push({ phase, bytes });
+  });
+  assert.deepEqual(progress, [
+    { phase: "locking", bytes: 0 }, { phase: "copying", bytes: 0 },
+    { phase: "copying", bytes: size }, { phase: "verifying", bytes: size },
+    { phase: "publishing", bytes: size }, { phase: "deleting", bytes: size },
+    { phase: "cleanup", bytes: size },
+  ]);
+});

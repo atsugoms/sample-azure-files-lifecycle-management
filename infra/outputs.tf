@@ -57,3 +57,25 @@ output "log_analytics_workspace_id" {
   description = "Workspace ARM ID for operational console/system logs (30-day retention)."
   value       = azurerm_log_analytics_workspace.main.id
 }
+
+output "postgres_host" {
+  description = "Private PostgreSQL hostname; null in SQLite mode."
+  value       = local.postgres_enabled ? azurerm_postgresql_flexible_server.history[0].fqdn : null
+}
+
+output "postgres_bootstrap_sql" {
+  description = "Review and run once as the configured Entra administrator over private networking, connected to postgres."
+  value = local.postgres_enabled ? templatefile("${path.module}/bootstrap-postgres.sql.tftpl", {
+    job_principal_id = azurerm_user_assigned_identity.job.principal_id
+  }) : null
+}
+
+output "postgres_vnet_id" {
+  description = "VNet for private bootstrap access; null in SQLite mode."
+  value       = local.postgres_enabled ? azurerm_virtual_network.history[0].id : null
+}
+
+output "job_egress_ip" {
+  description = "NAT outbound IP for PostgreSQL-mode jobs; does not itself permit access through external firewalls."
+  value       = local.postgres_enabled ? azurerm_public_ip.egress[0].ip_address : null
+}

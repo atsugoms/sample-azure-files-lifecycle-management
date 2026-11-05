@@ -7,14 +7,22 @@ locals {
   ])
   blob_container_scopes = toset([for id in var.destination_blob_container_resource_ids : lower(id)])
   container_image       = "${azurerm_container_registry.main.login_server}/files-archive:${var.image_tag}"
-  job_environment = {
+  job_environment = merge({
     AZURE_CLIENT_ID     = azurerm_user_assigned_identity.job.client_id
     APP_CONFIG_ENDPOINT = azurerm_app_configuration.main.endpoint
     APP_CONFIG_KEY      = var.app_config_key
     APP_CONFIG_LABEL    = var.app_config_label
     AUTH_MODE           = "managed-identity"
     JOB_TIMEOUT_SECONDS = tostring(var.job_timeout_seconds)
-  }
+    HISTORY_DB_PROVIDER = var.history_db_provider
+    }, local.postgres_enabled ? {
+    HISTORY_POSTGRES_AUTH_MODE = "entra"
+    HISTORY_POSTGRES_HOST      = azurerm_postgresql_flexible_server.history[0].fqdn
+    HISTORY_POSTGRES_DATABASE  = "archive_history"
+    HISTORY_POSTGRES_USER      = "archive_job"
+    HISTORY_POSTGRES_SCHEMA    = "archive"
+    HISTORY_POSTGRES_TLS       = "verify-full"
+  } : {})
 }
 
 resource "azurerm_resource_group" "main" {
@@ -38,6 +46,9 @@ resource "azurerm_container_app_environment" "main" {
   resource_group_name        = azurerm_resource_group.main.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
   tags                       = var.tags
+  infrastructure_subnet_id   = local.postgres_enabled ? azurerm_subnet.job[0].id : null
+
+  depends_on = [azurerm_subnet_nat_gateway_association.job]
 
   workload_profile {
     name                  = "Consumption"
@@ -177,5 +188,7 @@ resource "azurerm_container_app_job" "main" {
     azurerm_role_assignment.configuration_reader,
     azurerm_role_assignment.file_contributor,
     azurerm_role_assignment.blob_contributor,
+    azurerm_postgresql_flexible_server_active_directory_administrator.history,
+    azurerm_postgresql_flexible_server_database.history,
   ]
 }
