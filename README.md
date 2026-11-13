@@ -10,15 +10,17 @@ Azure Files の指定ディレクトリを定期走査し、一定期間更新�
 - インフラ
   - Azure Container Apps Jobs
   - Azure App Configuration
+  - Azure Database for PostgreSQL Flexible Server
 
-Web UI、進捗 DB、処理台帳、履歴画面、自動復旧・自動再開は実装していません。
-実行中の情報はメモリのみで保持し、運用ログを標準出力へ JSON 形式で出力します。
+実行単位とファイル単位の履歴を、Azure 上では PostgreSQL、ローカル実行では SQLite に保存します。
+運用ログは引き続き標準出力へ JSON 形式で出力します。履歴画面、自動復旧・自動再開は実装していません。
+DB 書き込みに失敗した場合は、後続の移動を停止します。
 
 ## 構成
 
 | ディレクトリ | 内容 |
 | --- | --- |
-| `infra/` | Terraform。Container Apps Job、実行環境、App Configuration、ACR、Managed Identity、RBAC、ログ |
+| `infra/` | Terraform。Container Apps Job、実行環境、App Configuration、ACR、Managed Identity、RBAC、PostgreSQL、VNet、ログ |
 | `job/` | 1 回実行して終了するコンテナーバッチ、設定例、テスト、設定・運用マニュアル |
 
 設定は App Configuration の **1 つの JSON 値**として読み込みます。
@@ -30,7 +32,7 @@ Web UI、進捗 DB、処理台帳、履歴画面、自動復旧・自動再開�
 1. 設定全体を検証し、移動元と移動先への読み取り接続を確認します。
 2. 指定パス配下を再帰的に走査します。日時判定は SMB の **最終書き込み時刻 (`fileLastWriteOn`)** です。
 3. `実行開始時刻 UTC - olderThanDays × 24 時間` より古いファイルを選びます。境界と同時刻のファイルは対象外です。
-4. `dryRun: true` では候補と競合をログに出すだけで、コピー・ロック・削除をしません。
+4. `dryRun: true` では候補と競合を標準出力と DB に記録し、コピー・ロック・削除をしません。
 5. 実移動では元ファイルをリースで保護し、4 MiB 単位でコピーします。
 6. 移動先を再読み取りし、サイズと SHA-256 を照合します。
 7. 元ファイルの同一性と両側のロックを再確認してから、元ファイルを削除します。
@@ -45,6 +47,7 @@ Azure Files のティアは共有単位なので、Files 移動先は用意済�
 - [インフラ構築・イメージ登録・定期実行](infra/README.md)
 - [App Configuration の設定・ローカル実行・障害復旧](job/README.md)
 - [設定例：Blob / Files の両方](job/settings.example.json)
+- [実行履歴 DB の設定と照会](job/README.md#実行履歴-db)
 
 初期設定は **Dry-run** です。Terraform も既定では Job を作らず、
 イメージ登録と設定投入後に手動 Job を作り、検証後に定期実行へ切り替えます。
@@ -75,7 +78,10 @@ Azure Files のティアは共有単位なので、Files 移動先は用意済�
   [ネットワーク要件](infra/README.md#権限とネットワーク)に従って構成を見直してください。
 
 作成対象は、リソースグループ、Container Apps 実行環境、Container Apps Job、
-ACR、App Configuration、ユーザー割り当て Managed Identity、RBAC、Log Analytics です。
+ACR、App Configuration、ユーザー割り当て Managed Identity、RBAC、Log Analytics、
+PostgreSQL、VNet、Private Endpoint、Private DNS です。DB は公開接続を無効にします。
+初回は [DB ロールの準備](infra/README.md#postgresql-の初期設定) が必要です。
+既存環境への適用は Container Apps Environment と Job の再作成を伴う可能性があるため、plan を確認してください。
 Job の認証と環境変数は Terraform が設定します。
 ストレージキー、SAS、接続文字列は使用しません。
 
@@ -106,6 +112,8 @@ Copy-Item .\terraform.tfvars.example .\terraform.tfvars
 | `destination_blob_container_resource_ids` | Blob 移動先の ARM リソース ID。使わない場合は `[]` |
 | `configuration_operator_object_ids` | 設定登録者の Entra オブジェクト ID。`App Configuration Data Owner` を付与 |
 | `image_tag` | 発行するイメージのタグ。初回例は `v1` |
+| `postgres_admin_object_id` / `postgres_admin_principal_name` | PostgreSQL 管理用 Entra グループのオブジェクト ID と表示名 |
+| `job_vnet_address_space` | 既存ネットワークと重複しない IPv4 `/16`。既定 `10.40.0.0/16` |
 | `create_job` / `enable_schedule` | 初回は両方とも `false` |
 
 Storage の入力は HTTPS URL やアカウント単位の ID ではなく、次の形式です。

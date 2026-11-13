@@ -8,6 +8,7 @@ Azure Container Apps Jobs で手動または日次実行するための最小 Az
 Terraform はジョブ実行基盤、イメージ格納、設定ストア、監視、Managed Identity、RBAC を管理します。
 処理対象の Storage Account、Azure Files 共有、Blob コンテナーは既存リソースとして扱い、
 Terraform では作成・変更しません。
+実行履歴用 PostgreSQL と、そのプライベート接続用ネットワークも管理します。
 
 ## 2. 論理構成
 
@@ -33,6 +34,7 @@ flowchart LR
     Job -->|FileREST OAuth| SourceFiles[既存 Azure Files<br/>移動元]
     Job -->|FileREST OAuth| DestinationFiles[既存 Azure Files<br/>移動先]
     Job -->|Blob OAuth| DestinationBlob[既存 Blob Container<br/>移動先]
+    Job -->|Private Endpoint / Entra / TLS| History[PostgreSQL<br/>executionlog]
 ```
 
 ## 3. Terraform 管理対象
@@ -47,6 +49,9 @@ flowchart LR
 | User-assigned Managed Identity | Job 実行専用 |
 | Container Apps Job | 0.5 vCPU、1 GiB、単一コンテナー |
 | RBAC | ACR、App Configuration、Files、Blob の最小対象スコープ |
+| PostgreSQL Flexible Server | PostgreSQL 16、32 GiB、Burstable、Entra のみ、バックアップ 7 日、HA なし |
+| VNet／サブネット | Container Apps 専用 `/23`、DB Private Endpoint 専用 `/24` |
+| Private Endpoint／Private DNS | DB 公開接続無効、`privatelink.postgres.database.azure.com` |
 
 ### Terraform 管理対象外
 
@@ -169,6 +174,9 @@ Job 専用 ID と対象共有に限定します。
 - Job から ACR、App Configuration、Storage の公開 HTTPS endpoint へ接続します。
 - ACR と App Configuration の public network access は有効です。
 - 既存 Storage のネットワーク設定は Terraform で変更しません。
+- Job 環境を VNet へ接続し、PostgreSQL は Private Endpoint と Private DNS で到達します。
+- 既存環境の VNet 統合への変更では Environment と Job の置き換えが必要になる可能性があります。
+- DB 管理端末の VPN／peering は対象外です。初回 DB ロール作成にはプライベート接続が必要です。
 
 Storage firewall や Azure Policy で public network access が無効な場合、
 RBAC だけでは接続できません。次のいずれかが必要です。
@@ -187,6 +195,8 @@ Terraform は組織固有タグや Storage の public network access を自動�
 - Log Analytics の保持期間は 30 日です。
 - Job の platform ログから image pull、replica 作成、終了コードを確認できます。
 - アプリログから設定 ETag、候補、移動、失敗、summary を確認できます。
+- PostgreSQL に実行とファイル単位の履歴を保存します。保持・削除は運用で管理し、自動再開には使用しません。
+- DB 診断ログとメトリックを Log Analytics へ送信します。
 
 現状はアラート、ダッシュボード、長期監査保管を Terraform で作成しません。
 本番では次を追加検討します。
@@ -242,7 +252,7 @@ flowchart LR
 
 - ルールまたはディレクトリ単位の分割
 - キューを利用したファイル単位の並列化
-- PostgreSQL 等の処理台帳
+- 履歴 DB を拡張した自動再開用の処理台帳
 - 再開・重複排除設計
 - Dedicated workload profile
 - App Configuration Standard
@@ -262,11 +272,11 @@ flowchart LR
 ## 15. 現状の対象外
 
 - Storage Account／共有／コンテナーの Terraform 作成
-- Private Endpoint／VNet 統合
+- Storage／ACR／App Configuration の Private Endpoint
 - Azure Monitor アラート
 - リモート Terraform backend
 - マルチリージョン／DR
 - Job execution 間の分散排他
 - Web UI と設定編集 API
-- データベースと実行履歴
+- 履歴 UI と履歴を使用した自動再開
 

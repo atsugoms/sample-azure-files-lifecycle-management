@@ -188,3 +188,52 @@ variable "tags" {
   default     = {}
   nullable    = false
 }
+
+variable "job_vnet_address_space" {
+  description = "Non-overlapping private IPv4 /16 for the job VNet; reserves /23 for Container Apps and /24 for database endpoints."
+  type        = string
+  default     = "10.40.0.0/16"
+  nullable    = false
+  validation {
+    condition     = can(cidrnetmask(var.job_vnet_address_space)) && can(regex("/16$", var.job_vnet_address_space))
+    error_message = "job_vnet_address_space must be an IPv4 /16 CIDR."
+  }
+}
+
+variable "postgres_admin_object_id" {
+  description = "Entra administrator object ID for PostgreSQL and initial job database role provisioning."
+  type        = string
+  nullable    = false
+  validation {
+    condition     = can(regex("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.postgres_admin_object_id))
+    error_message = "postgres_admin_object_id must be an Entra object UUID."
+  }
+}
+
+variable "postgres_admin_principal_name" {
+  description = "Principal name of the Entra PostgreSQL administrator."
+  type        = string
+  nullable    = false
+  validation {
+    condition     = length(trimspace(var.postgres_admin_principal_name)) > 0
+    error_message = "postgres_admin_principal_name must not be empty."
+  }
+}
+
+variable "postgres_admin_principal_type" {
+  description = "Entra PostgreSQL administrator type; prefer a dedicated Group, or User for isolated tests."
+  type        = string
+  default     = "Group"
+  nullable    = false
+  validation {
+    condition     = contains(["Group", "User"], var.postgres_admin_principal_type)
+    error_message = "postgres_admin_principal_type must be Group or User."
+  }
+}
+
+variable "postgres_sku_name" {
+  description = "PostgreSQL compute SKU. Burstable default is for samples, without high availability."
+  type        = string
+  default     = "B_Standard_B1ms"
+  nullable    = false
+}

@@ -1,13 +1,42 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_data "azurerm_client_config" {
+    defaults = {
+      tenant_id = "22222222-2222-2222-2222-222222222222"
+    }
+  }
+}
 
 variables {
-  subscription_id = "00000000-0000-0000-0000-000000000000"
+  subscription_id               = "00000000-0000-0000-0000-000000000000"
+  postgres_admin_object_id      = "11111111-1111-1111-1111-111111111111"
+  postgres_admin_principal_name = "postgres-admins"
   source_file_share_resource_ids = [
     "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/storage-rg/providers/Microsoft.Storage/storageAccounts/sourceacct/fileServices/default/shares/source"
   ]
   destination_blob_container_resource_ids = [
     "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/storage-rg/providers/Microsoft.Storage/storageAccounts/destacct/blobServices/default/containers/archive"
   ]
+}
+
+run "private_execution_history" {
+  command = plan
+
+  assert {
+    condition     = !azurerm_postgresql_flexible_server.history.public_network_access_enabled && !azurerm_postgresql_flexible_server.history.authentication[0].password_auth_enabled && azurerm_postgresql_flexible_server.history.authentication[0].active_directory_auth_enabled
+    error_message = "History must use private connectivity and Entra-only authentication."
+  }
+  assert {
+    condition     = azurerm_subnet.job.address_prefixes == tolist(["10.40.0.0/23"]) && azurerm_subnet.database.address_prefixes == tolist(["10.40.2.0/24"])
+    error_message = "Job and private endpoints must use distinct subnets."
+  }
+  assert {
+    condition     = local.job_environment.DB_DRIVER == "postgres" && azurerm_postgresql_flexible_server_configuration.require_tls.value == "on"
+    error_message = "Azure jobs must persist history to PostgreSQL over TLS."
+  }
+  assert {
+    condition     = azurerm_subnet.database.private_endpoint_network_policies == "Enabled" && length(azurerm_network_security_group.database.security_rule) == 2
+    error_message = "Private endpoint subnet must enforce NSG rules for PostgreSQL and deny other inbound traffic."
+  }
 }
 
 run "foundations_only_by_default" {

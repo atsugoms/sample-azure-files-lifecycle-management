@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "./config.js";
+import type { ExecutionHistory, FileOutcome } from "./history.js";
 import { ConflictError, type ArchiveWriter, type FileInfo, type LockedFile,
   type Log, type RuleStorage, type StorageFactory, type Summary } from "./model.js";
 
@@ -83,6 +84,7 @@ export function describeError(error: unknown): Record<string, unknown> {
 
 export async function run(
   settings: Settings, factory: StorageFactory, log: Log, signal: AbortSignal, now = new Date(),
+  history?: { store: ExecutionHistory; runId: string },
 ): Promise<Summary> {
   const summary: Summary = {
     scanned: 0, eligible: 0, moved: 0, dryRun: 0, changed: 0, failed: 0, limitReached: false,
@@ -107,6 +109,9 @@ export async function run(
       }
       summary.eligible++;
       const context = { rule: rule.id, path: file.path, bytes: file.size };
+      const fileId = await history?.store.startFile(history.runId, rule, file, settings.dryRun);
+      let outcome: FileOutcome;
+      let failure: Record<string, unknown> | undefined;
       try {
         if (file.size > MAX_FILE_SIZE) {
           throw new Error(`File exceeds supported limit of ${MAX_FILE_SIZE} bytes`);
@@ -115,18 +120,20 @@ export async function run(
           throw new ConflictError("Destination exists; source retained; manual reconciliation required");
         }
         if (settings.dryRun) {
-          summary.dryRun++;
-          log("dry_run", context);
+          outcome = "dry_run";
         } else {
-          const outcome = await moveFile(storage, file, cutoff, signal);
-          summary[outcome]++;
-          log(outcome, context);
+          outcome = await moveFile(storage, file, cutoff, signal);
         }
       } catch (error) {
-        summary.failed++;
-        log("file_failed", { ...context, error: describeError(error) });
-        signal.throwIfAborted();
+        outcome = "failed";
+        failure = describeError(error);
       }
+      log(outcome === "failed" ? "file_failed" : outcome,
+        { ...context, ...(failure ? { error: failure } : {}) });
+      // Keep DB failures outside the storage-error handler: never continue without an audit trail.
+      if (history && fileId) await history.store.finishFile(fileId, outcome, failure);
+      summary[outcome === "dry_run" ? "dryRun" : outcome]++;
+      signal.throwIfAborted();
     }
   }
   log("summary", { ...summary });
