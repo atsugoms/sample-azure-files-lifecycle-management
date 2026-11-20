@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./auth": "./dist/src/auth.js",
+    "./config": "./dist/src/config.js",
+    "./history": "./dist/src/history.js"
+  },
   "engines": {
     "node": ">=24 <25"
   },
@@ -17,10 +22,12 @@
     "@azure/identity": "^4.13.3",
     "@azure/storage-blob": "^12.33.0",
     "@azure/storage-file-share": "^12.32.0",
+    "pg": "^8.16.3",
     "zod": "^4.6.2"
   },
   "devDependencies": {
     "@types/node": "^24.13.4",
+    "@types/pg": "^8.15.6",
     "typescript": "^7.0.2"
   }
 }

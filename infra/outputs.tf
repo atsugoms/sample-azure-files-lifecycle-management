@@ -57,3 +57,28 @@ output "log_analytics_workspace_id" {
   description = "Workspace ARM ID for operational console/system logs (30-day retention)."
   value       = azurerm_log_analytics_workspace.main.id
 }
+
+output "postgres_host" {
+  description = "Private PostgreSQL hostname; reachable only from the VNet or a connected network."
+  value       = azurerm_postgresql_flexible_server.history.fqdn
+}
+
+output "postgres_database" {
+  description = "Execution history database."
+  value       = azurerm_postgresql_flexible_server_database.history.name
+}
+
+output "postgres_job_user" {
+  description = "Entra database role name to create for the job managed identity."
+  value       = azurerm_user_assigned_identity.job.name
+}
+
+output "postgres_bootstrap_sql" {
+  description = "Run once with psql as the Entra administrator, initially connected to postgres via a private network. Not executed by Terraform."
+  value       = <<-SQL
+    SELECT * FROM pgaadauth_create_principal_with_oid('${azurerm_user_assigned_identity.job.name}', '${azurerm_user_assigned_identity.job.principal_id}', 'service', false, false);
+    \connect executionlog
+    GRANT CONNECT ON DATABASE executionlog TO "${azurerm_user_assigned_identity.job.name}";
+    GRANT USAGE, CREATE ON SCHEMA public TO "${azurerm_user_assigned_identity.job.name}";
+  SQL
+}

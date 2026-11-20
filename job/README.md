@@ -3,7 +3,9 @@
 ## 実装範囲
 
 App Configuration からルールを読み、Azure Files を再帰走査して Blob または別の Files 共有へ移動します。
-Web UI、DB、履歴機能、進捗ファイル、キュー、永続的な再試行台帳はありません。
+実行単位とファイル単位の履歴を Azure では PostgreSQL、ローカルでは SQLite に保存します。
+管理用 Web UI は別ディレクトリの [app](../app/README.md) にあります。
+バッチには進捗ファイル、キュー、永続的な再試行台帳、自動再開はありません。
 SDK の短い通信リトライはありますが、ジョブ全体の自動リトライは Terraform の初期設定で無効です。
 
 ロックは排他制御のために使用します。これは進捗保存ではありませんが、ファイルリース自体は
@@ -214,7 +216,7 @@ Blob 移動先には **Storage Blob Data Contributor** が必要です。
   Blob メタデータの `archive_source_*` はこのジョブ用に予約され、元の同名メタデータは置き換わります。
 - ディレクトリ ACL の複製、空ディレクトリの削除、復元機能はありません。
 - ジョブやルール全体のトランザクションではありません。一部ファイルの失敗時も残りの処理を続けます。
-  設定不正、事前接続確認、走査自体のエラー、期限切れはジョブを停止します。
+  設定不正、事前接続確認、走査自体のエラー、期限切れ、DB 書き込み失敗はジョブを停止します。
 
 同時実行をスケジュール設定だけで完全には防げません。`parallelism=1` は各 execution 内の設定です。
 同じ元ファイルはリースで競合し、同じ移動先は排他的作成／rename で保護しますが、
@@ -236,12 +238,82 @@ Blob 移動先には **Storage Blob Data Contributor** が必要です。
 | `limit_reached` | 候補処理件数の上限に到達 |
 | `summary` | 走査・候補・移動・Dry-run・変更・失敗件数 |
 | `fatal` | 設定取得・走査・タイムアウト等でジョブを中断 |
+| `history_failed` | 障害終了の DB 記録、または DB 接続の終了に失敗 |
 
 終了コードは、全件成功／対象なし／正常な Dry-run が `0`、失敗または上限到達が `1` です。
 `summary` は進捗台帳ではなくログで、次回実行からは読みません。
 削除の応答を受信できなかった場合や、削除後のリース解除が失敗した場合も `file_failed` になります。
 その場合は元が既に削除されている可能性があるため、ログだけで判断せず両側の実データを確認します。
 パスに個人情報等を含む場合は、Log Analytics の閲覧権限・保持期間も管理してください。
+
+## 実行履歴 DB
+
+| 実行場所 | 接続設定 |
+| --- | --- |
+| Azure (`AUTH_MODE=managed-identity`) | PostgreSQL が既定。`PGHOST`、`PGDATABASE`、`PGUSER` が必須 |
+| ローカル (`AUTH_MODE=azure-cli`) | SQLite が既定。`SQLITE_PATH` は既定 `execution-log.sqlite` |
+| ローカルから Azure PostgreSQL | `DB_DRIVER=postgres` と上記 `PG*` を設定。VNet への接続と DB ロールが必要 |
+
+Azure では SQLite への切り替えや DB 無効化を許可しません。PostgreSQL の認証には既存の
+Managed Identity／Azure CLI 資格情報から取得する Entra トークンを使用します。
+パスワード、接続文字列は使用せず、TCP 5432 と証明書検証付き TLS 1.2 以上で接続します。
+接続期限は 10 秒、クエリのクライアント期限は 15 秒、サーバー実行期限は 10 秒です。
+Azure CLI の利用者にも DB 管理者による PostgreSQL ロールと権限の設定が必要です。
+
+SQLite は Node.js 24 組み込みの `node:sqlite` を使用し、WAL、`synchronous=FULL`、
+外部キー制約、5 秒のロック待ちを有効にします。`SQLITE_PATH` の親ディレクトリは
+事前に作成し、書き込み権限を付与してください。メモリ DB は指定できません。
+DB ファイルと `-wal`／`-shm` を含むディレクトリを保護し、Git に追加しないでください。
+
+```powershell
+# job ディレクトリ。既存の APP_CONFIG_* と az login の設定も必要です。
+$env:AUTH_MODE = "azure-cli"
+$env:DB_DRIVER = "sqlite"
+$env:SQLITE_PATH = Join-Path (Get-Location) "execution-log.sqlite"
+npm start
+```
+
+初回接続時に次のテーブルと索引を作成します。アプリ更新時も既存の履歴は消しません。
+
+| テーブル | 保存内容 |
+| --- | --- |
+| `execution_runs` | `run_id`、UTC 開始／終了時刻、状態、設定キー／ラベル／ETag・Dry-run 情報、集計 JSON、致命的エラー JSON |
+| `file_executions` | 試行 ID、`run_id`、ルール ID、移動元／先 URL、元のバージョン・最終書き込み時刻、バイト数、Dry-run、UTC 開始／終了時刻、状態、エラー JSON |
+
+対象期間に該当するファイルだけを記録し、対象外ファイルは個別記録しません。
+同じファイルを次回実行で処理した場合は別の試行として保存します。
+ファイルのロック・コピーに入る前に `running` を保存し、後処理まで完了した後に
+`moved`／`changed`／`dry_run`／`failed` へ更新します。実行全体は
+`running` → `succeeded`／`failed`／`limit_reached` になります。
+設定取得エラーは DB 初期化後なら実行の `failed` として記録します。
+認証設定不正や DB 自体に接続できない場合は DB 記録できず、標準出力の `fatal` で確認します。
+
+**DB と Storage の操作は単一トランザクションではありません。**
+開始記録に失敗したファイルは移動せず、終了記録に失敗した場合も後続ファイルは処理しません。
+移動後の DB 障害や強制停止ではファイルが `running` のまま残ることがあります。
+`running` は「現在処理中」とは限らず、結果不明を含みます。
+`failed` も「元が残っている」保証ではありません。両側の実データと運用ログを確認してください。
+履歴を使った自動再開・重複排除・分散排他は行いません。
+DB 履歴の自動削除はないため、保持期間、バックアップ、閲覧権限、削除手順を運用で管理してください。
+
+以下の SQL は PostgreSQL と SQLite の両方で使用できます。
+PostgreSQL では `psql`、SQLite では SQLite 対応クライアントを使用します。
+
+```sql
+SELECT run_id, started_at, finished_at, status, summary_json, error_json
+FROM execution_runs ORDER BY started_at DESC LIMIT 20;
+
+SELECT rule_id, source_url, destination_url, bytes, status, error_json
+FROM file_executions WHERE run_id = '<run-id>' ORDER BY started_at, id;
+
+SELECT run_id, source_url, destination_url, started_at
+FROM file_executions WHERE status = 'running' ORDER BY started_at;
+```
+
+`npm test` は SQLite の再オープン後の永続化と DB 障害時の停止を確認します。
+空の専用 PostgreSQL DB を用意して `TEST_POSTGRES_URL` を設定すると、同じスキーマと
+ライフサイクルの結合テストも実行できます。この変数はテスト専用で、本番アプリは参照しません。
+テストはテーブルとデータを残すため、運用 DB は指定しないでください。
 
 ## 異常終了後の復旧
 

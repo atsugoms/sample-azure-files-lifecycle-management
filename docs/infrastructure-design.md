@@ -8,6 +8,12 @@ Azure Container Apps Jobs で手動または日次実行するための最小 Az
 Terraform はジョブ実行基盤、イメージ格納、設定ストア、監視、Managed Identity、RBAC を管理します。
 処理対象の Storage Account、Azure Files 共有、Blob コンテナーは既存リソースとして扱い、
 Terraform では作成・変更しません。
+実行履歴用 PostgreSQL と、そのプライベート接続用ネットワークも管理します。
+
+この文書の第 2～15 節は `infra\` 直下の **バッチ用 Terraform** の設計です。
+Web UI を含む専用検証環境は `infra\web-demo\` の **別の Bicep 定義**で構築します。
+その差分は [第 16 節](#16-web-ui-を含む専用検証環境bicep)を参照してください。
+両定義で同じリソースを管理したり、既存 Terraform state を Bicep 環境へ流用したりしません。
 
 ## 2. 論理構成
 
@@ -33,6 +39,7 @@ flowchart LR
     Job -->|FileREST OAuth| SourceFiles[既存 Azure Files<br/>移動元]
     Job -->|FileREST OAuth| DestinationFiles[既存 Azure Files<br/>移動先]
     Job -->|Blob OAuth| DestinationBlob[既存 Blob Container<br/>移動先]
+    Job -->|Private Endpoint / Entra / TLS| History[PostgreSQL<br/>executionlog]
 ```
 
 ## 3. Terraform 管理対象
@@ -47,6 +54,9 @@ flowchart LR
 | User-assigned Managed Identity | Job 実行専用 |
 | Container Apps Job | 0.5 vCPU、1 GiB、単一コンテナー |
 | RBAC | ACR、App Configuration、Files、Blob の最小対象スコープ |
+| PostgreSQL Flexible Server | PostgreSQL 16、32 GiB、Burstable、Entra のみ、バックアップ 7 日、HA なし |
+| VNet／サブネット | Container Apps 専用 `/23`、DB Private Endpoint 専用 `/24` |
+| Private Endpoint／Private DNS | DB 公開接続無効、`privatelink.postgres.database.azure.com` |
 
 ### Terraform 管理対象外
 
@@ -169,6 +179,9 @@ Job 専用 ID と対象共有に限定します。
 - Job から ACR、App Configuration、Storage の公開 HTTPS endpoint へ接続します。
 - ACR と App Configuration の public network access は有効です。
 - 既存 Storage のネットワーク設定は Terraform で変更しません。
+- Job 環境を VNet へ接続し、PostgreSQL は Private Endpoint と Private DNS で到達します。
+- 既存環境の VNet 統合への変更では Environment と Job の置き換えが必要になる可能性があります。
+- DB 管理端末の VPN／peering は対象外です。初回 DB ロール作成にはプライベート接続が必要です。
 
 Storage firewall や Azure Policy で public network access が無効な場合、
 RBAC だけでは接続できません。次のいずれかが必要です。
@@ -187,6 +200,8 @@ Terraform は組織固有タグや Storage の public network access を自動�
 - Log Analytics の保持期間は 30 日です。
 - Job の platform ログから image pull、replica 作成、終了コードを確認できます。
 - アプリログから設定 ETag、候補、移動、失敗、summary を確認できます。
+- PostgreSQL に実行とファイル単位の履歴を保存します。保持・削除は運用で管理し、自動再開には使用しません。
+- DB 診断ログとメトリックを Log Analytics へ送信します。
 
 現状はアラート、ダッシュボード、長期監査保管を Terraform で作成しません。
 本番では次を追加検討します。
@@ -242,7 +257,7 @@ flowchart LR
 
 - ルールまたはディレクトリ単位の分割
 - キューを利用したファイル単位の並列化
-- PostgreSQL 等の処理台帳
+- 履歴 DB を拡張した自動再開用の処理台帳
 - 再開・重複排除設計
 - Dedicated workload profile
 - App Configuration Standard
@@ -259,14 +274,78 @@ flowchart LR
 - Dry-run を既定とし、実移動とスケジュールは段階的に有効化します。
 - 移動先を上書きせず、検証完了前に元ファイルを削除しません。
 
-## 15. 現状の対象外
+## 15. Terraform の対象外
 
 - Storage Account／共有／コンテナーの Terraform 作成
-- Private Endpoint／VNet 統合
+- Storage／ACR／App Configuration の Private Endpoint
 - Azure Monitor アラート
 - リモート Terraform backend
 - マルチリージョン／DR
 - Job execution 間の分散排他
-- Web UI と設定編集 API
-- データベースと実行履歴
+- Web UI 用 Container App と組み込み認証のデプロイ（Bicep で対応）
+- 履歴を使用した自動再開（アプリケーションでも未実装）
+
+## 16. Web UI を含む専用検証環境（Bicep）
+
+`infra\web-demo\` は空の専用環境に Web UI・バッチ・合成データを配置する検証用です。
+既存業務 Storage を使う Terraform と異なり、対象 Storage も新規作成します。
+
+| 定義 | 責務 |
+| --- | --- |
+| `main.bicep` | VNet、NSG、実行環境、ログ、ACR、App Configuration、2 つの ID、PostgreSQL、Storage、Private Endpoint、RBAC |
+| `workloads.bicep` | Web Container App、組み込み Entra 認証、Manual Job |
+| `schedule-access.bicep` | Web 用 ID に指定 Job の読み取り・更新・起動・execution 参照だけを付与 |
+| `helper.bicep` | DB 初期化、合成データ作成、検証を実行する Manual Job |
+| `app\scripts\deploy-demo.ps1` | 基盤・イメージ・初期化・公開・検証の段階実行。既存リソースの削除は行わない |
+
+### 構成と Terraform との差分
+
+| 項目 | Bicep の専用検証環境 |
+| --- | --- |
+| Web | 外部 HTTPS ingress、0.5 vCPU／1 GiB、最小・最大とも 1 replica。`/healthz` 以外は認証必須 |
+| バッチ | 0.5 vCPU／1 GiB、Manual、retry 0、replica timeout 600 秒、アプリ timeout 540 秒 |
+| helper | 同じイメージを使う Manual Job、retry 0、timeout 300 秒。モードごとに実行用 Managed Identity を切り替える |
+| イメージ | リポジトリルートの `app\Dockerfile` で Web と job をビルドし、`archive-console:<tag>` として共有 |
+| 設定 | `archive:settings`／ラベル `validation`。Dry-run、上限 100、90 日より古い Files → Blob Cool の 1 ルール |
+| PostgreSQL | 16／Standard_B1ms／32 GiB、`executionlog`、Entra のみ、TLS 1.2 以上、公開接続無効 |
+| Storage | 専用 Standard LRS、SMB 共有 `source`（5 GiB）、Blob コンテナー `archive`。公開接続・共有キー・Blob 匿名アクセス無効 |
+| ネットワーク | `10.46.0.0/16`、Container Apps `/23`、Private Endpoint `/24`、各 NSG。PostgreSQL・File・Blob の Private Endpoint と Private DNS |
+| 外向き接続 | ACR Basic と App Configuration Free は公開 HTTPS。Container Apps サブネットの `defaultOutboundAccess` は有効。NAT／固定送信 IP は作成しない |
+| 命名 | prefix とリソースグループ ID から 6 桁サフィックスを生成。Terraform の命名規則とは別 |
+
+アドレス範囲、SKU、DB 名などは検証用の固定値を含みます。
+別ネットワークへの接続や本番利用では、定義を確認してから設計を見直してください。
+Terraform の DB 診断設定、削除保護などが Bicep にも同じように含まれるとは限りません。
+
+### 権限と認証
+
+| ID | 権限 |
+| --- | --- |
+| Job | ACR の AcrPull、App Configuration の Data Reader、専用 Storage アカウントの File Data Privileged Contributor、`archive` コンテナーの Blob Data Contributor |
+| Web | ACR の AcrPull、App Configuration の Data Owner、指定 Job だけのカスタム管理ロール。Storage 権限なし |
+| 操作者 | App Configuration の Data Owner、PostgreSQL の Entra 管理者。必要な Azure／Entra デプロイ権限は別途用意 |
+| DB `archive_job` | `executionlog` への CONNECT、public スキーマへの USAGE／CREATE、履歴テーブルの所有・書き込み |
+| DB `archive_web` | CONNECT／USAGE／SELECT のみ。Job が作成するテーブルへの既定 SELECT 権限も初期化 |
+
+FileREST 権限は、合成データだけを置く専用 Storage アカウント全体への割り当てです。
+業務データを置くアカウントへそのまま適用しないでください。
+
+Web の利用者認証は既存のシングルテナント Entra アプリ登録を使用します。
+デプロイ時にログインした操作者のオブジェクト ID だけをアプリ側で許可します。
+DB／Storage の接続にパスワードや共有キーは使用しませんが、Easy Auth 用には
+180 日のクライアントシークレットを発行し、Container App の secret に保持します。
+DB 初期化用の短命な管理者トークンは helper の secure parameter／secret 経由で渡し、
+初期化後は secret と環境変数参照を除去します。いずれもソースや平文の設定ファイルには保存しません。
+
+### 検証範囲
+
+2026-11-20 に Japan East の専用環境で、Entra サインイン、画面・API、条件付き設定保存、
+無効スケジュール保存、Web UI からの単発 Dry-run と履歴記録を確認しました。
+DB の読み取り専用権限、実リソースの RBAC、元ファイルの内容・日時の保持、
+移動先が空のままであることも確認しています。
+実コピー・削除、定期実行の発火、可用性・復旧試験は含みません。
+環境は保持しており、継続課金と認証シークレット更新が必要です。
+
+前提権限、段階実行、再デプロイ時の注意点は
+[Web UI のデプロイ手順](web-ui.md#専用検証環境のデプロイ)を参照してください。
 

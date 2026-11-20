@@ -14,6 +14,10 @@ locals {
     APP_CONFIG_LABEL    = var.app_config_label
     AUTH_MODE           = "managed-identity"
     JOB_TIMEOUT_SECONDS = tostring(var.job_timeout_seconds)
+    DB_DRIVER           = "postgres"
+    PGHOST              = azurerm_postgresql_flexible_server.history.fqdn
+    PGDATABASE          = azurerm_postgresql_flexible_server_database.history.name
+    PGUSER              = azurerm_user_assigned_identity.job.name
   }
 }
 
@@ -37,6 +41,7 @@ resource "azurerm_container_app_environment" "main" {
   location                   = azurerm_resource_group.main.location
   resource_group_name        = azurerm_resource_group.main.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+  infrastructure_subnet_id   = azurerm_subnet.job.id
   tags                       = var.tags
 
   workload_profile {
@@ -45,6 +50,8 @@ resource "azurerm_container_app_environment" "main" {
     minimum_count         = 0
     maximum_count         = 0
   }
+
+  depends_on = [azurerm_subnet_network_security_group_association.job]
 }
 
 resource "azurerm_container_registry" "main" {
@@ -177,5 +184,11 @@ resource "azurerm_container_app_job" "main" {
     azurerm_role_assignment.configuration_reader,
     azurerm_role_assignment.file_contributor,
     azurerm_role_assignment.blob_contributor,
+    azurerm_private_endpoint.postgres,
+    azurerm_private_dns_zone_virtual_network_link.postgres,
+    azurerm_postgresql_flexible_server_active_directory_administrator.history,
+    azurerm_postgresql_flexible_server_configuration.require_tls,
+    azurerm_postgresql_flexible_server_configuration.minimum_tls,
+    azurerm_subnet_network_security_group_association.database,
   ]
 }

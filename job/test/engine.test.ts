@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { parseSettings } from "../src/config.js";
 import { BLOCK_SIZE, MAX_FILE_SIZE, isOldEnough, moveFile, run } from "../src/engine.js";
 import type { ArchiveWriter, FileInfo, LockedFile, RuleStorage } from "../src/model.js";
+import type { ExecutionHistory } from "../src/history.js";
 
 const now = new Date("2026-09-18T00:00:00Z");
 const cutoff = now.getTime() - 90 * 86400000;
@@ -191,4 +192,66 @@ test("pre-aborted executions do not touch storage", async () => {
   await assert.rejects(run(settings, () => f.storage, () => {}, signal, now));
   await assert.rejects(moveFile(f.storage, sourceFile, cutoff, signal));
   assert.deepEqual(f.calls, []);
+});
+
+function historySpy(failAt?: "start" | "finish") {
+  const events: string[] = [];
+  const store: ExecutionHistory = {
+    async startRun() {},
+    async configureRun() {},
+    async finishRun() {},
+    async close() {},
+    async startFile() {
+      events.push("start");
+      if (failAt === "start") throw new Error("history start failed");
+      return "attempt";
+    },
+    async finishFile(_id, status, error) {
+      events.push(status);
+      if (status === "failed") assert.ok(error);
+      if (failAt === "finish") throw new Error("history finish failed");
+    },
+  };
+  return { events, store, runId: "run" };
+}
+
+test("history is committed before moving and records moved, dry-run, changed and failed outcomes", async () => {
+  for (const outcome of ["moved", "dry_run", "changed", "failed"] as const) {
+    const history = historySpy();
+    const f = fake({
+      exists: outcome === "failed",
+      ...(outcome === "changed" ? { locked: { ...sourceFile, version: "changed" } } : {}),
+    });
+    const lock = f.storage.lock;
+    f.storage.lock = async (file) => {
+      assert.deepEqual(history.events, ["start"]);
+      return lock(file);
+    };
+    await run({ ...settings, dryRun: outcome === "dry_run" }, () => f.storage, () => {},
+      new AbortController().signal, now, history);
+    assert.deepEqual(history.events, ["start", outcome]);
+  }
+});
+
+test("history failure stops before movement or before processing another file", async () => {
+  for (const failAt of ["start", "finish"] as const) {
+    const history = historySpy(failAt);
+    const f = fake({ files: [sourceFile, sourceFile] });
+    await assert.rejects(run(settings, () => f.storage, () => {},
+      new AbortController().signal, now, history), /history .* failed/);
+    assert.equal(f.calls.filter((call) => call === "delete").length, failAt === "start" ? 0 : 1);
+    assert.equal(history.events.filter((event) => event === "start").length, 1);
+  }
+});
+
+test("cancelled file is recorded as failed before propagating interruption", async () => {
+  const controller = new AbortController();
+  const f = fake();
+  f.storage.lock = async () => {
+    controller.abort(new Error("cancelled"));
+    throw new Error("lock interrupted");
+  };
+  const history = historySpy();
+  await assert.rejects(run(settings, () => f.storage, () => {}, controller.signal, now, history), /cancelled/);
+  assert.deepEqual(history.events, ["start", "failed"]);
 });
