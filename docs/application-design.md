@@ -3,11 +3,12 @@
 ## 1. 目的
 
 Azure Files の指定パスを走査し、最終書き込みから一定期間が経過したファイルを、
-Azure Blob Storage または別の Azure Files 共有へ移動するバッチアプリケーションです。
+Azure Blob Storage または別の Azure Files 共有へ移動するバッチと、その管理用 Web UI です。
 
-1 回実行して終了するジョブです。実行とファイルごとの履歴を Azure では PostgreSQL、
+バッチは 1 回実行して終了するジョブです。実行とファイルごとの履歴を Azure では PostgreSQL、
 ローカルでは SQLite へ保存し、標準出力にも JSON ログを出力します。
-Web UI、実行履歴画面、自動再開用の進捗台帳は実装しません。
+`app/` の Web UI で既存履歴 DB を読み取り専用で参照し、設定・実行を管理します。
+自動再開用の進捗台帳は実装しません。詳細は [Web UI](web-ui.md) を参照してください。
 
 ## 2. 技術構成
 
@@ -15,11 +16,12 @@ Web UI、実行履歴画面、自動再開用の進捗台帳は実装しませ�
 | --- | --- |
 | 実行環境 | Node.js 24 |
 | 言語 | TypeScript |
+| Web UI | Node.js 標準 HTTP サーバー、HTML／CSS／JavaScript。Web フレームワーク不使用 |
 | 設定検証 | Zod |
 | 設定ストア | Azure App Configuration |
 | 実行履歴 | PostgreSQL (`pg`)／SQLite (`node:sqlite`) |
 | ファイル操作 | Azure Storage SDK for JavaScript |
-| 認証 | ユーザー割り当て Managed Identity |
+| 認証 | Azure リソース接続はユーザー割り当て Managed Identity、ローカルは Azure CLI。Web 利用者は組み込み Entra 認証 |
 | コンテナー | `node:24-bookworm-slim`、非 root ユーザー |
 | テスト | Node.js Test Runner、Azure SDK モック |
 
@@ -34,6 +36,8 @@ Web UI、実行履歴画面、自動再開用の進捗台帳は実装しませ�
 | `job/src/model.ts` | ストレージ操作を抽象化するインターフェイスと集計モデル |
 | `job/src/check-config.ts` | ローカル設定ファイルの事前検証 |
 | `job/src/history.ts` | PostgreSQL／SQLite の履歴スキーマ、実行とファイル試行の開始・終了記録 |
+| `job/src/auth.ts` | バッチと Web UI が共用する Azure CLI／Managed Identity 認証 |
+| `app/src/history.ts` | 現行の実行・ファイル履歴テーブルを読み取る Web UI 用アダプター。DB は作成・更新しない |
 
 ストレージ固有処理は `RuleStorage`、`LockedFile`、`ArchiveWriter` に分離し、
 処理エンジンは Azure SDK の詳細に依存しない構成です。
@@ -397,11 +401,29 @@ GROUP BY run_id, status;
 | `SQLITE_PATH` | ローカル SQLite の永続ファイルパス。既定 `execution-log.sqlite` |
 
 コンテナーでは開発者資格情報や共有キーへフォールバックしません。
+この表はバッチ用です。Web の `WEB_*`、`PORT` と DB 接続の違いは
+[Web UI の環境変数](web-ui.md#環境変数)を参照してください。
 
-## 11. 対象外
+## 11. Web UI の設計
 
-- Web UI
-- 自動再開用の進捗台帳、履歴画面
+Web は継続稼働し、バッチとは別プロセス・別の Managed Identity を使用します。
+
+| 操作 | 実装・保存先 |
+| --- | --- |
+| 実行・ファイル履歴の参照 | 既存 `execution_runs`／`file_executions`。読み取り専用、スキーマ作成・変更なし |
+| アーカイブ設定の保存 | バッチ共通スキーマで検証し、App Configuration に ETag 付きで保存 |
+| スケジュール設定 | 対象 Job の Manual／Schedule を ARM API で更新。毎日・毎週の JST を UTC cron に変換 |
+| 単発起動 | 保存済み設定の ETag と実行モードを確認し、Job の標準テンプレートを 1 回起動 |
+
+Web の DB ロールは SELECT のみに限定し、Storage データアクセス権は付与しません。
+履歴の `running` と Azure の execution 状態は別に扱い、Web から結果を書き換えません。
+起動要求の重複抑止は同一 Web プロセス内だけで、永続台帳や分散ロックではありません。
+組み込み Entra 認証に加えて発行者・テナント・許可ユーザー、Host・Origin を検査します。
+API、モジュール構成、更新競合・起動結果不明時の操作は [Web UI の解説](web-ui.md) を参照してください。
+
+## 12. 対象外
+
+- 自動再開用の進捗台帳、試行・再開の専用履歴画面
 - 自動再開、自動競合解消
 - 複数 execution 間の分散ロック
 - NFS Azure Files
@@ -410,7 +432,7 @@ GROUP BY run_id, status;
 - Blob 上での NTFS ACL 保持
 - 空ディレクトリの移動・削除
 
-## 12. テスト方針
+## 13. テスト方針
 
 - 設定の正常系・異常系
 - 閾値境界
@@ -421,8 +443,13 @@ GROUP BY run_id, status;
 - 空ファイル、複数ブロック、キャンセル
 - 移動先競合、走査後変更、上限到達
 - SQLite の永続化、PostgreSQL の共通 SQL、DB 障害時の移動停止
+- Web による現行履歴 DB の読み取り専用参照、未記録値・不正スキーマの扱い
+- 設定保存の ETag、認証・CSRF 検査、スケジュール変換・更新、単発起動と重複抑止
 
 Azure SDK はモックし、ユニットテストでは Azure リソースを変更しません。
 Managed Identity、RBAC、ネットワーク、SMB ロック、Files rename は専用 Azure 環境で
 Dry-run と受け入れ確認を行います。
+2026-11-20 の専用環境では Entra サインイン、Web の読み書き、単発 Dry-run と
+PostgreSQL／Storage のプライベート接続を確認しました。
+実コピー・削除や有効な定期スケジュールの発火は、この確認実績には含みません。
 

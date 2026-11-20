@@ -4,8 +4,14 @@ AzureRM v4 と Terraform 1.9 以降で、Container Apps Job、実行環境、ACR
 App Configuration、ユーザー割り当てマネージド ID、RBAC、
 実行履歴用 PostgreSQL Flexible Server、VNet、Private Endpoint、Private DNS を作成します。
 Log Analytics は標準出力とプラットフォーム ログ用で、保持期間は 30 日です。
-UI、自動再開用の進捗管理は作成しません。
+この Terraform は Web UI 用 Container App と認証設定、自動再開用の進捗管理は作成しません。
+Web UI の実装と公開時の前提条件は [Web UI の解説](../docs/web-ui.md) を参照してください。
 既存の Storage アカウント、Files 共有、Blob コンテナーの作成や変更は行いません。
+
+`infra\web-demo\` は、この Terraform とは別の専用検証環境用 Bicep です。
+Web UI・認証・手動 Job に加えて、合成データ用 Storage とプライベート接続も作成します。
+利用する場合は [専用検証環境のデプロイ](../docs/web-ui.md#専用検証環境のデプロイ)に従い、
+以下の Terraform 手順や既存 state と混在させないでください。
 
 ## 前提条件
 
@@ -31,7 +37,11 @@ ACR のイメージ発行と、実際の Container Apps Job での Dry-run が�
 実際のコピー・削除は未検証であり、定期実行も無効です。
 設定は `archive:settings` の単一キーを参照します。
 以下の apply は実リソースと課金を発生させるため、plan を確認してから利用してください。
-上記の実績は DB 追加前の構成です。PostgreSQL と VNet 統合は Azure 上では未検証です。
+上記の実績は DB 追加前の Terraform 構成です。現行 Terraform 定義での
+PostgreSQL と VNet 統合の apply は Azure 上では未検証です。
+別途、2026-11-20 に `web-demo` Bicep で PostgreSQL と Storage の Private Endpoint、
+Web UI とバッチの DB 接続・Dry-run を確認しました。
+これは Terraform 定義そのものの検証実績ではありません。
 既存構成への適用では Container Apps Environment と Job の置き換えが必要になる可能性があります。
 スケジュールを止め、全 execution の終了後に plan の変更・削除を確認してください。
 
