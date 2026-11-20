@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AppConfigurationClient } from "@azure/app-configuration";
-import { AzureCliCredential, ManagedIdentityCredential } from "@azure/identity";
+import { createCredential, readAuthMode } from "./auth.js";
 import { AzureRuleStorage } from "./azure-storage.js";
 import { parseSettings } from "./config.js";
 import { describeError, run } from "./engine.js";
@@ -29,16 +29,8 @@ try {
   if (!endpoint || !/^https:\/\/[a-zA-Z0-9-]+\.azconfig\.io\/?$/.test(endpoint)) {
     throw new Error("APP_CONFIG_ENDPOINT must be an Azure public-cloud App Configuration HTTPS endpoint");
   }
-  const mode = process.env.AUTH_MODE ?? "managed-identity";
-  if (mode !== "managed-identity" && mode !== "azure-cli") {
-    throw new Error("AUTH_MODE must be managed-identity or azure-cli");
-  }
-  if (mode === "managed-identity" && !process.env.AZURE_CLIENT_ID) {
-    throw new Error("AZURE_CLIENT_ID is required for user-assigned managed identity");
-  }
-  const credential = mode === "azure-cli"
-    ? new AzureCliCredential()
-    : new ManagedIdentityCredential({ clientId: process.env.AZURE_CLIENT_ID! });
+  const mode = readAuthMode(process.env);
+  const credential = createCredential(process.env);
   history = await openHistory(process.env, credential, mode);
   await history.startRun(runId);
   runStarted = true;

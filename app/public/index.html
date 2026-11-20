@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Archive Console | Azure Files</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/">A<span>Archive Console<small>AZURE FILES LIFECYCLE</small></span></a>
+    <p class="nav-label">ワークスペース</p>
+    <nav aria-label="メインナビゲーション">
+      <button id="nav-history" class="nav active" aria-current="page">実行履歴 <span>01</span></button>
+      <button id="nav-settings" class="nav">アーカイブ設定 <span>02</span></button>
+      <button id="nav-schedule" class="nav">実行スケジュール <span>03</span></button>
+    </nav>
+    <div class="sidebar-note"><span class="dot"></span> <span id="hosting-label">管理コンソール</span><p>設定は次回の実行から反映されます。実行中のジョブには影響しません。</p></div>
+  </aside>
+  <main>
+    <header class="topbar"><span>Storage operations <span class="muted">/ 管理コンソール</span></span><span id="hosting-tag" class="local-tag"></span></header>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="history-view">
+      <div class="page-heading"><div><p class="eyebrow">EXECUTION HISTORY</p><h1>実行履歴</h1><p class="muted">過去の実行結果と、ファイルごとの処理状況を確認します。</p></div><button id="refresh-history" class="button secondary">履歴を更新</button></div>
+      <div class="info-banner">履歴はジョブと同じ DB を読み取り専用で参照します。表示は自動更新されません。「実行中／結果未確定」には、異常終了で結果が未記録のものも含まれます。</div>
+      <div class="panel">
+        <div class="panel-heading"><h2>アーカイブ実行</h2><span class="muted">新しい実行から表示</span></div>
+        <div class="table-wrap"><table><thead><tr><th>実行 ID / 開始日時</th><th>状態</th><th>モード</th><th>ルール</th><th></th></tr></thead><tbody id="runs"></tbody></table></div>
+        <div class="pagination"><button id="runs-prev" class="button secondary">前へ</button><span id="runs-page"></span><button id="runs-next" class="button secondary">次へ</button></div>
+      </div>
+      <section id="run-detail" hidden aria-labelledby="detail-title">
+        <div class="detail-heading"><div><p class="eyebrow">RUN DETAILS</p><h2 id="detail-title">実行の詳細</h2><code id="detail-id"></code></div><button id="refresh-detail" class="button secondary">詳細を更新</button></div>
+        <div id="metrics" class="metrics"></div>
+        <div class="panel"><div class="panel-heading"><h2>ファイル別の処理結果</h2><span class="muted">DB に保存された移動元・移動先・サイズ・結果</span></div><div class="table-wrap"><table><thead><tr><th>ファイル / ルール</th><th>状態</th><th>ファイルサイズ / モード</th><th>開始 / 終了</th><th>エラー</th></tr></thead><tbody id="files"></tbody></table></div>
+          <div class="pagination"><button id="files-prev" class="button secondary">前へ</button><span id="files-page"></span><button id="files-next" class="button secondary">次へ</button></div>
+        </div>
+        <details class="panel snapshot"><summary>DB に記録された実行情報・集計・エラー</summary><p class="muted">設定キー・ラベル・ETag、実行モード等の記録を表示します。設定 JSON 全体や処理途中の転送量は DB に保存されていません。</p><pre id="run-record"></pre></details>
+      </section>
+    </section>
+    <section id="settings-view" hidden>
+      <div class="page-heading"><div><p class="eyebrow">ARCHIVE SETTINGS</p><h1>アーカイブ設定</h1><p class="muted">移動元、保存先、対象期間をまとめて管理します。</p></div><button id="reload-settings" class="button secondary">設定を再読み込み</button></div>
+      <div class="info-banner">App Configuration の設定全体を保存します。定期実行は「実行スケジュール」で設定します。認証・履歴 DB の変更は対象外です。</div>
+      <p id="config-source" class="muted"></p>
+      <form id="settings-form">
+        <fieldset id="settings-fields" disabled>
+          <div class="panel settings-general"><div><h2>実行オプション</h2><p class="muted">Dry-run で対象ファイルを確認してから実移動へ切り替えてください。</p></div><label class="check-label"><input id="dry-run" type="checkbox"> Dry-run（コピー・削除しない）</label><label>1 回の対象ファイル上限<input id="max-files" type="number" min="1" max="100000" required></label></div>
+          <div class="rules-heading"><div><h2>アーカイブルール</h2><p class="muted">上から順に実行します。最大 20 ルールを設定できます。</p></div><button id="add-rule" type="button" class="button secondary">＋ ルールを追加</button></div>
+          <div id="rules"></div>
+          <div id="live-warning" class="warning" hidden>実移動モードでは、コピーと検証の完了後に元ファイルが削除されます。保存前に対象を確認してください。</div>
+          <div class="save-bar"><span id="dirty-label" class="muted">変更はありません</span><button id="save-settings" class="button primary" type="submit">設定を保存</button></div>
+        </fieldset>
+      </form>
+    </section>
+    <section id="schedule-view" hidden>
+      <div class="page-heading"><div><p class="eyebrow">EXECUTION SCHEDULE</p><h1>実行スケジュール</h1><p class="muted">毎日・毎週の定期実行を日本時間で設定します。</p></div><button id="reload-schedule" class="button secondary">スケジュールを再読み込み</button></div>
+      <div class="info-banner">対象の Azure Container Apps Job に直接反映します。無効時は手動実行のみです。実行中のジョブは停止しません。</div>
+      <p id="schedule-source" class="muted"></p>
+      <p id="schedule-mode" class="warning" hidden></p>
+      <p id="schedule-unsupported" class="warning" hidden>このジョブのトリガー・cron 式は毎日・毎週として編集できません。Azure 側で確認してください。設定は上書きしません。</p>
+      <div class="panel">
+        <div class="panel-heading"><h2>単発実行</h2><button id="refresh-execution" type="button" class="button secondary">実行状況を更新</button></div>
+        <div class="execution-body">
+        <p>保存済みのアーカイブ設定で、今すぐ 1 回だけ起動します。定期実行が無効でも利用できます。未保存の編集は適用しません。定期スケジュールは変更しません。</p>
+        <p id="execution-status" class="muted" role="status">実行状況は未取得です。</p>
+        <div class="save-bar"><span class="muted">実行開始後の結果は「実行履歴」で確認してください。</span><button id="run-now" type="button" class="button primary" disabled>今すぐ実行</button></div>
+        </div>
+      </div>
+      <form id="schedule-form"><fieldset id="schedule-fields" disabled>
+        <div class="panel settings-general schedule-panel">
+          <div><h2>定期実行</h2><p class="muted">タイムゾーン: 日本標準時（Asia/Tokyo / UTC+09:00）</p></div>
+          <label class="check-label"><input id="schedule-enabled" type="checkbox"> 定期実行を有効にする</label>
+          <label>実行周期<select id="schedule-frequency"><option value="daily">毎日</option><option value="weekly">毎週</option></select></label>
+          <label>実行時刻（日本時間）<input id="schedule-time" type="time" step="60" required value="09:00"></label>
+          <div id="schedule-weekdays" class="schedule-weekdays" role="group" aria-label="実行曜日" hidden>
+            <label class="check-label"><input type="checkbox" value="0">日</label><label class="check-label"><input type="checkbox" value="1">月</label><label class="check-label"><input type="checkbox" value="2">火</label><label class="check-label"><input type="checkbox" value="3">水</label><label class="check-label"><input type="checkbox" value="4">木</label><label class="check-label"><input type="checkbox" value="5">金</label><label class="check-label"><input type="checkbox" value="6">土</label>
+          </div>
+          <p>Azure に保存する cron（UTC）: <code id="schedule-cron">—</code></p>
+          <p>保存済みスケジュールの次回予定（日本時間）: <strong id="schedule-next">—</strong></p>
+          <p class="muted">次回予定は計算上の目安です。実行開始には遅延が生じる場合があります。重複実行を避けるため、ジョブの実行時間に余裕を持った間隔を選んでください。</p>
+        </div>
+        <div class="save-bar"><span id="schedule-dirty" class="muted">変更はありません</span><button id="save-schedule" class="button primary" type="submit">スケジュールを保存</button></div>
+      </fieldset></form>
+    </section>
+    <footer>Azure Files Lifecycle Management <span>設定・履歴・定期実行・単発実行の管理 · 自動再開・障害復旧は対象外</span></footer>
+  </main>
+  <dialog id="save-dialog"><form method="dialog"><p class="eyebrow">CONFIRM CHANGES</p><h2>設定を保存しますか？</h2><p id="save-description"></p><p class="muted">次回の新規実行から反映されます。実行中のジョブには反映されません。</p><div class="dialog-actions"><button class="button secondary" value="cancel">キャンセル</button><button class="button primary" value="save">保存する</button></div></form></dialog>
+  <dialog id="schedule-dialog"><form method="dialog"><p class="eyebrow">CONFIRM SCHEDULE</p><h2>スケジュールを保存しますか？</h2><p id="schedule-description"></p><p class="warning">実行時のアーカイブ設定が実移動モードの場合、コピー・検証後に元ファイルが削除されます。スケジュールの保存では Dry-run 設定は変更しません。</p><div class="dialog-actions"><button class="button secondary" value="cancel">キャンセル</button><button class="button primary" value="save">保存する</button></div></form></dialog>
+  <dialog id="execution-dialog"><form method="dialog"><p class="eyebrow">CONFIRM EXECUTION</p><h2>今すぐ 1 回実行しますか？</h2><p id="execution-description" class="warning"></p><p class="muted">実行開始時点の保存済み設定が適用されます。未保存の編集は適用しません。定期スケジュールは変更しません。</p><div class="dialog-actions"><button class="button secondary" value="cancel">キャンセル</button><button class="button primary" value="start">1 回実行する</button></div></form></dialog>
+</body>
+</html>

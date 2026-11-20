@@ -8,20 +8,22 @@ Azure Files の指定ディレクトリを定期走査し、一定期間更新�
 - アプリ
   - Node.js 24 / TypeScript
 - インフラ
-  - Azure Container Apps Jobs
+  - Azure Container Apps（Web UI）／Container Apps Jobs（バッチ）
   - Azure App Configuration
   - Azure Database for PostgreSQL Flexible Server
 
 実行単位とファイル単位の履歴を、Azure 上では PostgreSQL、ローカル実行では SQLite に保存します。
-運用ログは引き続き標準出力へ JSON 形式で出力します。履歴画面、自動復旧・自動再開は実装していません。
+運用ログは引き続き標準出力へ JSON 形式で出力します。
+`app/` の Web UI で設定編集と履歴参照ができます。自動復旧・自動再開は実装していません。
 DB 書き込みに失敗した場合は、後続の移動を停止します。
 
 ## 構成
 
 | ディレクトリ | 内容 |
 | --- | --- |
-| `infra/` | Terraform。Container Apps Job、実行環境、App Configuration、ACR、Managed Identity、RBAC、PostgreSQL、VNet、ログ |
+| `infra/` | バッチ基盤用 Terraform と、Web UI を含む専用検証環境用 `web-demo/` Bicep |
 | `job/` | 1 回実行して終了するコンテナーバッチ、設定例、テスト、設定・運用マニュアル |
+| `app/` | 設定・履歴・スケジュール・単発実行を扱う Web UI。履歴 DB は読み取り専用 |
 
 設定は App Configuration の **1 つの JSON 値**として読み込みます。
 既定のキーは `archive:settings`、ラベルは `production` です。
@@ -48,6 +50,7 @@ Azure Files のティアは共有単位なので、Files 移動先は用意済�
 - [App Configuration の設定・ローカル実行・障害復旧](job/README.md)
 - [設定例：Blob / Files の両方](job/settings.example.json)
 - [実行履歴 DB の設定と照会](job/README.md#実行履歴-db)
+- [Web UI の機能・起動・DB 接続](docs/web-ui.md)
 
 初期設定は **Dry-run** です。Terraform も既定では Job を作らず、
 イメージ登録と設定投入後に手動 Job を作り、検証後に定期実行へ切り替えます。
@@ -55,7 +58,16 @@ Azure Files のティアは共有単位なので、Files 移動先は用意済�
 
 ## Azureへデプロイ・実行
 
-アプリは **Azure Container Apps Jobs 上のコンテナー**として実行します。
+デプロイ方法は用途に応じて分かれます。同じ環境に両方を適用しないでください。
+
+| 用途 | 定義・手順 |
+| --- | --- |
+| Web UI とバッチをまとめて検証 | `infra/web-demo/` Bicep と `app/scripts/deploy-demo.ps1`。[専用検証環境のデプロイ](docs/web-ui.md#専用検証環境のデプロイ) |
+| 既存 Storage を使うバッチ基盤 | `infra/` 直下の Terraform。この節以降の手順 |
+
+バッチは **Container Apps Job**、Web UI は別の **Container App** として実行します。
+Terraform は Web UI と組み込み認証を作成しません。
+Bicep は専用 Storage と Private Endpoint も作成し、既存の Terraform state は使用しません。
 以下はローカルでバッチを動かす手順ではなく、インフラを作成し、アプリを Azure へ配置して実行する手順です。
 コマンドはリポジトリを取得した端末の PowerShell で、記載順に実行してください。
 各コマンドが成功したことを確認してから次へ進みます。
